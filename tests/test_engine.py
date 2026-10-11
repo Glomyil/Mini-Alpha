@@ -25,7 +25,8 @@ tests/test_engine.py —— engine.py 验收（手工 fixture：4 只 × 8 个�
   ⑳ W 的列与面板列不一致：顺序打乱 / 子集 / 多余列（KeyError）
   ㉑ 现金透支：持仓卖不掉时的无成本融资（**钉住已知偏差**，杠杆 ≈ 2）
   ㉒ init_cash 尺度不变性（钉住「目前无整手 / 无最低佣金」）
-  ㉓ 断言条数守卫（防止测试空转）
+  ㉓ 诊断列：nav_open（开盘口径逐日）+ nav_pre（成交前净值）→ 恒等式 nav_open(执行日) = nav_pre − 费用
+  ㉔ 断言条数守卫（防止测试空转）
 
   注：基础 fixture 一律 slippage=0.0（手算干净）；滑点与未来函数各自单独一节验证。
 
@@ -276,6 +277,14 @@ res_small = EN.run_layer(W, P, list(RDATES), slippage=0.0, init_cash=1.0)
 res_big = EN.run_layer(W, P, list(RDATES), slippage=0.0, init_cash=1000000.0)
 check(bool(np.allclose(res_big['nav'].to_numpy() / 1000000.0, res_small['nav'].to_numpy(), atol=1e-9)),
       '1.0 与 1e6 的净值曲线完全同形（分数股、无最低佣金 → 本金只是尺度）')
+
+print('\n── ㉓ 诊断列：开盘净值 / 成交前净值（估值与交易同时点 → 账能对上）──')
+nav_open_s = res['nav_open']
+check(bool(nav_open_s.notna().all()) and list(nav_open_s.index) == list(DAYS),
+      'nav_open 与 nav 同索引、逐日有值（估值不只在执行日发生）')
+check(bool(np.allclose((res['nav_pre'] - res['fees']).to_numpy(),
+                       nav_open_s.loc[res['nav_pre'].index].to_numpy(), atol=1e-9)),
+      f"恒等式：nav_open(执行日) = nav_pre − 费用（d1 实测 {float(nav_open_s.loc[DAYS[1]]):.10f}）")
 
 check(passed + failed >= 15, f"断言条数守卫：{passed + failed} 条")
 print(f"结果: 通过 {passed} / {passed + failed}")
