@@ -56,3 +56,8 @@ backtest/cache/
 
 # ---- 因子灵感（本地私有笔记，不进公开仓）----
 因子灵感.txt
+logs/
+
+reports/
+_tmp_*/
+*.log
