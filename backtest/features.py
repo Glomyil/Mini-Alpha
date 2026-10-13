@@ -11,8 +11,20 @@ def listed(panels):  # 此函数用于检查已有缓存数据是否正常，所
 def ret(panels, n):  # 此函数用于校验日收益率变动，即今天收益相较于前一天收益波动的程度
     if n == 1:
         return panels["ret_1d_hfq"].copy()
-    r = panels["hfq_close"].ffill().pct_change(n, fill_method=None)
-    return r.where(listed(panels)).astype("float32")
+    # —— 2026-10-13 重写（PITFALLS #23）：不再走 pandas 的 pct_change/shift ——
+    # 实测：pandas 的 shift 偶发不写"头部 NaN 块"，那一段保留未初始化内存（看起来像正常数据）；
+    # 曾观测到 ret(20) 的预热区漏进 20×5471 个值 → 排名退化 → 分层不变 → 换手塌陷。
+    # 这里改成纯 numpy：先造好全 NaN 数组，再显式写 [n:] ⇒ 每个格子都由我们写，结构上不存在"未写区"。
+    px = panels["hfq_close"].ffill().to_numpy()          # dtype 跟随面板（float32）
+    out = np.full(px.shape, np.nan, dtype=px.dtype)
+    out[n:] = px[n:] / px[:-n] - 1.0
+    r = pd.DataFrame(out, index=panels["hfq_close"].index,
+                     columns=panels["hfq_close"].columns)
+    f = r.where(listed(panels)).astype("float32")
+    # 精确不变量：预热 n 行必须全 NaN（同时给 where/astype 也上一道保险）
+    _bad = int(f.iloc[:n].notna().to_numpy().sum())
+    assert _bad == 0, f"ret({n}) 预热 {n} 行出现 {_bad} 个非 NaN —— 数据退化（PITFALLS #23），拒绝回测"
+    return f
 
 
 def vol(panels, n):  # 计算波动率，即用一天收益率变化率用标准差公式计算
