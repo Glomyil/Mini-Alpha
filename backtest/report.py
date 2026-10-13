@@ -1,4 +1,5 @@
 from __future__ import annotations
+import shutil
 import pandas as pd
 import matplotlib.pyplot as plt
 from backtest import metrics as MT
@@ -80,10 +81,15 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             panels, [factor]), {}) * spec["sign"]
         ic = MT.rank_ic(factor_val, panels, rdates)
         ic_sum = MT.ic_summary(ic)
-    stamp = pd.Timestamp.today().strftime("%Y%m%d")
+    stamp = pd.Timestamp.today().strftime("%Y-%m-%d")          # 只进报告正文（文件名不带日期 → 每次运行覆盖同一份）
     outdir.mkdir(parents=True, exist_ok=True)
-    png = nav_plot(nav_df, outdir /
-                   f"nav_{factor}_{val_basis}_{stamp}.png", title=f"{factor} 分层净值")
+    png = outdir / f"nav_{factor}_{val_basis}.png"
+    md = outdir / f"report_{factor}_{val_basis}.md"
+    if md.exists():                                     # 覆盖前留一份"上一次"，供前后比对（每因子只留一版）
+        for _p in (md, png):
+            if _p.exists():
+                shutil.copy2(_p, _p.with_name(_p.stem + "_prev" + _p.suffix))
+    nav_plot(nav_df, png, title=f"{factor} 分层净值")
     meta = {"factor": factor, "start": nav_df.index[0].date(), "end": nav_df.index[-1].date(),
             "n_rdate": len(rdates), "trading_days": MT.TRADING_DAYS,
             "periods_per_year": MT.REBALANCE_PERIODS_PER_YEAR, "val_basis": val_basis,
@@ -108,7 +114,6 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
         parts += ["## 5. 备注", "", note, ""]
     parts += [f"![分层净值]({png.name})", ""]
 
-    md = outdir / f"report_{factor}_{val_basis}_{stamp}.md"
     md.write_text("\n".join(parts), encoding="utf-8")
     return {"md": md, "png": png, "layer_tab": layer_tab, "ls": ls, "ic": ic, "ic_summary": ic_sum}
 

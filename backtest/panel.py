@@ -49,6 +49,17 @@ def source_fingerprint(src=SRC):
             "total_mb": round(sum(p.stat().st_size for p in files) / 2**20, 1)}
 
 
+def _materialize(panels: dict) -> dict:
+    """强制物化：把四张表拷成独立连续内存。
+
+    实验性护栏（2026-10-13）：追查"同一输入两次跑出不同结果"的间歇性 bug 时，
+    怀疑点之一是"读到的数据在首次触碰时偶发退化（全 NaN / 全 False）"。
+    `.copy()` 会在这一次调用里把值真正读出来一遍 —— 若该假设成立，可消除异常；
+    若异常照旧，则说明根因不在这里（那就保留它也无害：引擎从此拿到的是私有副本）。
+    """
+    return {k: v.copy() for k, v in panels.items()}
+
+
 def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, full=None):
     src, cache = Path(src or SRC), Path(cache or CACHE)      # 后三个只为测试注入
     files = sorted(src.glob("*.parquet"))
@@ -64,12 +75,13 @@ def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, f
                 # ④ 数据还是那份
                 and meta["source_fingerprint"] == source_fingerprint(src)
                 and meta_p.stat().st_mtime > _SELF.stat().st_mtime):       # ⑤ 缓存比这份代码新
-            panels = {k: pd.read_parquet(p) for k, p in paths.items()}
+            panels = _materialize({k: pd.read_parquet(p) for k, p in paths.items()})
             assert panels["hfq_close"].shape == (
                 meta["rows"], meta["cols"]), "缓存被改坏了"
             return panels
 
     panels = build_panels(files)                                        # 重建
+    panels = _materialize(panels)
     if is_full:                                                          # 子集：不落盘
         cache.mkdir(parents=True, exist_ok=True)
         for k, p in paths.items():

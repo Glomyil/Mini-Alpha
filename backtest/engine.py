@@ -6,12 +6,25 @@ import pandas as pd
 def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, slippage=0.0005, init_cash=1.0):
     days = panels["hfq_close"].index
     cols = W_layer.columns
-    px_open = panels["hfq_open"][cols]
-    px_val = panels["hfq_close"][cols].ffill()
-    px_prev = px_val.shift(1)
-    px_open_val = panels["hfq_open"][cols].fillna(
-        px_prev)   # 每日开盘估值价（缺则截至上一交易日收盘）
-    ok = panels["can_trade"][cols].eq(True)
+    # 入口全部走 numpy（2026-10-13 改）：不再用 pandas 的 `[cols]` / `.eq(True)` / `.copy()` 链
+    # —— 那条链被实测到会**偶发**产出"形状正确、dtype 正确、但数据全 False"的表（非确定性缺陷）
+    op = panels["hfq_open"][cols].to_numpy()            # dtype 跟随面板（真实面板 float32 / 合成面板 float64）
+    vl = panels["hfq_close"][cols].ffill().to_numpy()   # 每日收盘估值价
+    pv = np.empty_like(vl)                              # ＝ px_val.shift(1)，dtype 与面板一致
+    pv[0] = np.nan
+    pv[1:] = vl[:-1]
+    opv = np.where(np.isnan(op), pv, op)                # 开盘估值价（缺则截至上一交易日收盘）
+    ct = panels["can_trade"][cols].to_numpy()           # bool
+
+    # —— 健康度断言（2026-10-13）：把"数据退化"变成响亮失败，而不是静默算错 ——
+    assert ct.size and ct.any(), f"can_trade 全 False（{ct.shape}）—— 数据退化，拒绝回测"
+    if ct.shape[1] > 1000:                                             # 全市场面板才做区间校验（合成小面板会越界）
+        _r = float(ct.mean())
+        assert 0.4 < _r < 0.95, f"can_trade True 占比 {_r:.3f} 越界（健康值 ≈0.73）—— 数据可疑"
+        _op = float((op > 0.0).mean())
+        _vl = float((vl > 0.0).mean())
+        assert _op > 0.3, f"hfq_open 正价占比 {_op:.3f} 过低（健康值 ≈0.75）—— 价格表退化，拒绝回测"
+        assert _vl > 0.3, f"hfq_close 正价占比 {_vl:.3f} 过低（健康值 ≈0.75）—— 价格表退化，拒绝回测"
 
     pos = days.get_indexer(pd.DatetimeIndex(rdates))
     exec_pos = {}
@@ -33,14 +46,16 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
     trades = pd.DataFrame(0.0, index=exec_days, columns=cols, dtype="float32")
     shares_hist = pd.DataFrame(
         0.0, index=exec_days, columns=cols, dtype="float32")
+    n_empty = 0            # 无票可成交的执行日数（按行退化的信号：全局均值可能仍正常）
 
     for i, dt in enumerate(days):
         if i in exec_pos:
             w = W_layer.loc[exec_pos[i]].fillna(0.0).to_numpy()
-            tradable = ok.loc[dt] & (px_open.loc[dt] > 0.0).to_numpy()
-            exec_px = np.where(tradable, px_open.loc[dt].to_numpy(), np.nan)
-            val_px = np.nan_to_num(
-                px_open.loc[dt].fillna(px_prev.loc[dt]).to_numpy())
+            tradable = ct[i] & (op[i] > 0.0)
+            if not tradable.any():
+                n_empty += 1
+            exec_px = np.where(tradable, op[i], np.nan)
+            val_px = np.nan_to_num(opv[i])
             nav_pre = cash + float((shares.to_numpy() * val_px).sum())
             nav_pre_s.loc[dt] = nav_pre                  # 留痕：成交前净值（对账用）
             tgt = np.where(np.isnan(exec_px), shares.to_numpy(),
@@ -58,11 +73,14 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
             fees.loc[dt] = fee
             trades.loc[dt] = delta.astype("float32")
             shares_hist.loc[dt] = shares.to_numpy().astype("float32")
-        nav.iloc[i] = cash + float((shares.to_numpy() *
-                                    np.nan_to_num(px_val.loc[dt].to_numpy())).sum())
-        nav_open.iloc[i] = cash + float((shares.to_numpy() *
-                                         np.nan_to_num(px_open_val.loc[dt].to_numpy())).sum())
+        nav.iloc[i] = cash + float((shares.to_numpy() * np.nan_to_num(vl[i])).sum())
+        nav_open.iloc[i] = cash + float((shares.to_numpy() * np.nan_to_num(opv[i])).sum())
         cash_s.iloc[i] = cash
+    # —— 按行健康度（2026-10-13）：全局均值正常也可能是"执行日那几行"退化 ——
+    # 实测健康态：129 个执行日里 0 个"无票可成交"（可成交率 99.8%）；退化时会是全部或大部分
+    if n_empty > max(2, len(exec_days) // 10):
+        raise AssertionError(
+            f"{n_empty}/{len(exec_days)} 个执行日无可成交标的 —— 价格/掩码表按行退化，拒绝交付结果")
     return {"nav": nav, "nav_open": nav_open, "nav_pre": nav_pre_s, "cash": cash_s,
             "turnover": turnover, "fees": fees, "trades": trades, "shares": shares_hist}
 

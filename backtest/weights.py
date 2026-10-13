@@ -7,6 +7,12 @@ from backtest.factors import FACTORS
 
 def build_target_weights(factor, rdates, can_trade, n_layers=5):
     cols = factor.columns
+    # —— 健康度断言（2026-10-13）：把"数据退化"变成响亮失败，而不是静默算错 ——
+    _ct = can_trade.to_numpy()
+    assert _ct.size and _ct.any(), f"can_trade 全 False（{can_trade.shape}）—— 数据退化，拒绝计算权重"
+    if _ct.shape[1] > 1000:                            # 全市场面板才做区间校验（合成小面板会越界）
+        _r = float(_ct.mean())
+        assert 0.4 < _r < 0.95, f"can_trade True 占比 {_r:.3f} 越界（健康值 ≈0.73）—— 数据可疑"
     layers = pd.DataFrame(-1, index=rdates, columns=cols, dtype="int8")
     W = [pd.DataFrame(0.0, index=rdates, columns=cols, dtype="float32")
          for _ in range(n_layers)]
