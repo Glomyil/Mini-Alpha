@@ -1,6 +1,8 @@
 from __future__ import annotations
 import pandas as pd
 import numpy as np
+import hashlib
+from loguru import logger
 
 
 def listed(panels):  # 此函数用于检查已有缓存数据是否正常，所需指标是否正常
@@ -24,6 +26,10 @@ def ret(panels, n):  # 此函数用于校验日收益率变动，即今天收益
     # 精确不变量：预热 n 行必须全 NaN（同时给 where/astype 也上一道保险）
     _bad = int(f.iloc[:n].notna().to_numpy().sum())
     assert _bad == 0, f"ret({n}) 预热 {n} 行出现 {_bad} 个非 NaN —— 数据退化（PITFALLS #23），拒绝回测"
+
+    logger.info(f"feat ret({n}) fp:{hashlib.md5(f.to_numpy().tobytes()).hexdigest()[:8]} "
+                f"nonnan:{int(f.notna().to_numpy().sum())} warmup_bad:{_bad}")
+
     return f
 
 

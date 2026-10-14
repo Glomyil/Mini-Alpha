@@ -15,6 +15,7 @@
 """
 
 from config.config_manager import config
+import hashlib
 from pathlib import Path
 from backtest.panel import load_panels
 from backtest.assemble import rebalance_dates
@@ -38,12 +39,15 @@ def init_log() -> None:
     enqueue=True 是异步写（不拖慢大计算）；个别受限环境不能建命名管道时退回同步写 ——
     **日志绝不能让主流程失败**。
     """
-    fmt = "{time:YYYY-MM-DD HH:mm:ss} | {message}"
+    fmt = "{time:YYYY-MM-DD HH:mm:ss} | {message}"                 # 干净一行一条；异常时 loguru 自动追加 traceback
+    # encoding="utf-8-sig"：带 BOM ⇒ Windows PowerShell 5.1 的 Get-Content / Select-String
+    # 也能自动认出 UTF-8（否则默认按 ANSI 读 → 中文全乱码，2026-10-14 实测）
     try:
-        logger.add(LOG_PATH, format=fmt, enqueue=True,
+        logger.add(LOG_PATH, format=fmt, enqueue=True, encoding="utf-8-sig",
                    rotation="5 MB", retention="60 days")
     except Exception:
-        logger.add(LOG_PATH, format=fmt, rotation="5 MB", retention="60 days")
+        logger.add(LOG_PATH, format=fmt, encoding="utf-8-sig",
+                   rotation="5 MB", retention="60 days")
 
 
 def main():
@@ -51,6 +55,10 @@ def main():
     config_check()
     init_log()                                                    # 关键数字落盘（日志教学参考 §5）
     panels = load_panels()                                        # 缓存提到循环外
+    # —— 运行身份（2026-10-14）：这一行让以后的任何一行数字都能回答"哪份代码 + 哪份数据"——
+    _fp = hashlib.md5(panels["hfq_close"].to_numpy().tobytes()).hexdigest()[:8]
+    logger.info(f"RUN 区间:{SINCE}+ 因子:{len(FACTORS)} panel:{_fp} "
+                f"shape:{panels['hfq_close'].shape}")
     rdates = [d for d in rebalance_dates(
         panels["hfq_close"].index) if d.year >= SINCE]
     for i, name in enumerate(FACTORS, 1):
@@ -90,4 +98,10 @@ def config_check() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # —— 异常留痕（2026-10-14）：出事的 traceback 也要进日志 ——
+    # 用 reraise=True：**日志记下来，退出码照样非 0**（不许把失败伪装成成功）
+    try:
+        with logger.catch(reraise=True, message="本次运行异常退出（traceback 见下）"):
+            main()
+    finally:
+        logger.complete()          # 异步写：确保队列里的行（含上面那几行 traceback）落盘

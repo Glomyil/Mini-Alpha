@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from backtest import metrics as MT
 from pathlib import Path
-
+from loguru import logger
 import matplotlib
 matplotlib.use("Agg")
 
@@ -81,7 +81,8 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             panels, [factor]), {}) * spec["sign"]
         ic = MT.rank_ic(factor_val, panels, rdates)
         ic_sum = MT.ic_summary(ic)
-    stamp = pd.Timestamp.today().strftime("%Y-%m-%d")          # 只进报告正文（文件名不带日期 → 每次运行覆盖同一份）
+    stamp = pd.Timestamp.today().strftime(
+        "%Y-%m-%d")          # 只进报告正文（文件名不带日期 → 每次运行覆盖同一份）
     outdir.mkdir(parents=True, exist_ok=True)
     png = outdir / f"nav_{factor}_{val_basis}.png"
     md = outdir / f"report_{factor}_{val_basis}.md"
@@ -98,6 +99,8 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
     parts = [f"# 因子回测报告 · `{factor}`", "", banner(meta), "",
              "## 1. 分层指标", "", md_table(layer_tab), ""]
     if ic_sum is not None:
+        logger.info(f"ic 有效:{ic_sum['n']} 无效:{ic_sum.get('n_bad', 0)} "
+                    f"mean:{ic_sum['ic_mean']:.4f} ir:{ic_sum['ic_ir']:.4f}")
         parts += ["## 2. IC（标签 = 下一个调仓日的区间收益）", "",
                   f"- IC 均值 **{ic_sum['ic_mean']:.4f}** ｜ 标准差 {ic_sum['ic_std']:.4f} "
                   f"｜ **IC-IR {ic_sum['ic_ir']:.4f}** ｜ 期数 {ic_sum['n']}", ""]

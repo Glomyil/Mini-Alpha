@@ -1,7 +1,7 @@
 import json
 import time
 from pathlib import Path
-
+from loguru import logger
 import pandas as pd
 
 from data import loader
@@ -64,20 +64,23 @@ def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, f
     src, cache = Path(src or SRC), Path(cache or CACHE)      # 后三个只为测试注入
     files = sorted(src.glob("*.parquet"))
     # ① 只有"全库"才落缓存（full 是给测试注入的：None = 自动判定）
-    is_full = (len(files) == len(loader.list_codes())) if full is None else bool(full)
+    is_full = (len(files) == len(loader.list_codes())
+               ) if full is None else bool(full)
     stem = f"panel_clean_full_{start[:4]}_{end[:4]}"         # ② 名字只带口径 + 区间
     meta_p = cache / f"{stem}_meta.json"
     paths = {k: cache / f"{stem}_{k}.parquet" for k in FIELDS}
 
-    if is_full and meta_p.exists():                 # meta 是最后写的 ⇒ meta 在 = 四张表在（写序即不变量）
+    if is_full and meta_p.exists():    # meta 是最后写的 ⇒ meta 在 = 四张表在（写序即不变量）
         meta = json.loads(meta_p.read_text(encoding="utf-8"))
-        if (meta["pipeline"] == [n for n, _ in PIPELINE]                   # ③ 环节清单没变
+        if (meta["pipeline"] == [n for n, _ in PIPELINE]               # ③ 环节清单没变
                 # ④ 数据还是那份
                 and meta["source_fingerprint"] == source_fingerprint(src)
-                and meta_p.stat().st_mtime > _SELF.stat().st_mtime):       # ⑤ 缓存比这份代码新
-            panels = _materialize({k: pd.read_parquet(p) for k, p in paths.items()})
+                and meta_p.stat().st_mtime > _SELF.stat().st_mtime):   # ⑤ 缓存比这份代码新
+            panels = _materialize({k: pd.read_parquet(p)
+                                   for k, p in paths.items()})
             assert panels["hfq_close"].shape == (
                 meta["rows"], meta["cols"]), "缓存被改坏了"
+            logger.info(f"panel hit shape:{panels['hfq_close'].shape}")    # 命中缓存（快路径）
             return panels
 
     panels = build_panels(files)                                        # 重建
@@ -95,6 +98,8 @@ def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, f
             "tradable_median": int(panels["can_trade"].sum(axis=1).median()),
             "source_fingerprint": source_fingerprint(src)}, ensure_ascii=False, indent=2),
             encoding="utf-8")
+    logger.info(
+        f"panel build shape:{panels['hfq_close'].shape} codes:{len(files)}")
     return panels
 
 
@@ -107,5 +112,7 @@ if __name__ == "__main__":
     per_day = panels["can_trade"].sum(axis=1)
     size_mb = sum(p.stat().st_size for p in CACHE.glob("*.parquet")) / 2**20
     print(f"面板 {c.shape}（交易日 × 股票）    本次调用 {used:.1f}s（第一次=重建，之后=命中）")
-    print(f"hfq_close 覆盖率 {c.notna().to_numpy().mean():.4%}    缓存 {size_mb:.1f} MB")
-    print(f"每天可交易标的数 中位 {int(per_day.median())} / 最少 {int(per_day.min())} / 最多 {int(per_day.max())}")
+    print(
+        f"hfq_close 覆盖率 {c.notna().to_numpy().mean():.4%}    缓存 {size_mb:.1f} MB")
+    print(
+        f"每天可交易标的数 中位 {int(per_day.median())} / 最少 {int(per_day.min())} / 最多 {int(per_day.max())}")

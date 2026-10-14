@@ -3,13 +3,15 @@ import pandas as pd
 import numpy as np
 from backtest.assemble import build_features, rebalance_dates
 from backtest.factors import FACTORS
+from loguru import logger
 
 
 def build_target_weights(factor, rdates, can_trade, n_layers=5):
     cols = factor.columns
     # —— 健康度断言（2026-10-13）：把"数据退化"变成响亮失败，而不是静默算错 ——
     _ct = can_trade.to_numpy()
-    assert _ct.size and _ct.any(), f"can_trade 全 False（{can_trade.shape}）—— 数据退化，拒绝计算权重"
+    assert _ct.size and _ct.any(
+    ), f"can_trade 全 False（{can_trade.shape}）—— 数据退化，拒绝计算权重"
     if _ct.shape[1] > 1000:                            # 全市场面板才做区间校验（合成小面板会越界）
         _r = float(_ct.mean())
         assert 0.4 < _r < 0.95, f"can_trade True 占比 {_r:.3f} 越界（健康值 ≈0.73）—— 数据可疑"
@@ -33,6 +35,13 @@ def build_target_weights(factor, rdates, can_trade, n_layers=5):
             members = tickers[layer == L]
             if len(members):
                 W[L].loc[dt, members] = np.float32(1.0 / len(members))
+    _un = int((layers.to_numpy() == -1).sum()
+              )                              # 未入层的格子数
+    _wmin = min(float(W[L].sum(axis=1).min())
+                for L in range(len(W)))       # W 每行权重和的最小值
+    _empty = sum(1 for L in range(len(W)) if float(
+        W[L].to_numpy().sum()) == 0.0)
+    logger.info(f"wts 未入层:{_un} 空层:{int(_empty)} W行和min:{_wmin:.4f}")
     return W, layers
 
 
