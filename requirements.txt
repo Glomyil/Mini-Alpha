@@ -4,3 +4,4 @@ numpy>=1.21.0
 pyarrow>=8.0.0
 duckdb>=0.10.0
 pyyaml>=6.0
+loguru>=0.7.0        

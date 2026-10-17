@@ -8,13 +8,15 @@ from data import loader
 from data.cleaner.pipeline import PIPELINE
 SRC = Path("data/storage/cleaner_daily")          # 净数据（已落盘，5,471 个长表）
 CACHE = Path("backtest/cache")
-FIELDS = ["hfq_close", "hfq_open", "ret_1d_hfq", "can_trade"]
+FIELDS = ["hfq_close", "hfq_open", "ret_1d_hfq",
+          "can_trade", "amount"]  # 新增宽表名单
 _SELF = Path(__file__)                            # 判断"缓存是不是比这份代码新"
 
 
 def build_panels(files):
-    """读 cleaner_daily → 4 张宽表（不做清洗、不落盘）"""
-    c_l, o_l, r_l, t_l = [], [], [], []
+    print(f"  开始重建面板：{len(files):,} 只 × {len(FIELDS)} 张表，约 30–90 秒（别中断）…")
+    # """读 cleaner_daily → 4 张宽表（不做清洗、不落盘）"""
+    c_l, o_l, r_l, t_l, a_l = [], [], [], [], []  # 想新建宽表就自己往等式左边加列表名，右边加列表:[]
     for p in files:
         d = pd.read_parquet(p)
         idx = pd.DatetimeIndex(pd.to_datetime(d["date"]))
@@ -31,13 +33,23 @@ def build_panels(files):
               & (pd.to_numeric(d["is_price_bad"], errors="coerce").fillna(1).to_numpy() == 0)
               & pd.notna(pd.to_numeric(d["hfq_close"], errors="coerce").to_numpy()))
         t_l.append(pd.Series(ok, index=idx, name=p.stem))
+        # ④ amount：流动性因子用（单位只影响绝对值，不影响横截面【排名】✓）
+
+        a_l.append(pd.Series(pd.to_numeric(d["amount"], errors="coerce").to_numpy(),
+                             index=idx, name=p.stem))
+
+        # 新增宽表格式统一使用（列表名）.append(pd.Series(pd.to_numeric(d["指标名"], errors="coerce").to_numpy(),
+        #                             index=idx, name=p.stem))
+
     # ★ 对齐后"未上市 / 已退市"的日期才第一次出现（长表里根本没有那一行）→ 那些格子是 NaN；
     #   bool 列一进 concat 会升成 object，此时 .astype(bool) 会把 NaN 变成 True（凭空可交易）
     #   → 用 .eq(True)：只有明确写着的 True 才算可交易
     return {"hfq_close":  pd.concat(c_l, axis=1).sort_index().astype("float32"),
             "hfq_open":   pd.concat(o_l, axis=1).sort_index().astype("float32"),
             "ret_1d_hfq": pd.concat(r_l, axis=1).sort_index().astype("float32"),
+            "amount":     pd.concat(a_l, axis=1).sort_index().astype("float32"),
             "can_trade":  pd.concat(t_l, axis=1).sort_index().eq(True)}
+    # 在返回的字典内新增与上述格式一致的宽表："指标名":     pd.concat(a_l, axis=1).sort_index().astype("float32"),
 
 
 def source_fingerprint(src=SRC):
@@ -80,7 +92,8 @@ def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, f
                                    for k, p in paths.items()})
             assert panels["hfq_close"].shape == (
                 meta["rows"], meta["cols"]), "缓存被改坏了"
-            logger.info(f"panel hit shape:{panels['hfq_close'].shape}")    # 命中缓存（快路径）
+            # 命中缓存（快路径）
+            logger.info(f"panel hit shape:{panels['hfq_close'].shape}")
             return panels
 
     panels = build_panels(files)                                        # 重建
