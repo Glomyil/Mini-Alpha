@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 from loguru import logger
 import pandas as pd
+import numpy as np
 
 from data import loader
 from data.cleaner.pipeline import PIPELINE
@@ -62,14 +63,25 @@ def source_fingerprint(src=SRC):
 
 
 def _materialize(panels: dict) -> dict:
-    """强制物化：把四张表拷成独立连续内存。
+    """Force a private, contiguous copy of every table AND verify the copy is complete.
 
-    实验性护栏（2026-10-13）：追查"同一输入两次跑出不同结果"的间歇性 bug 时，
-    怀疑点之一是"读到的数据在首次触碰时偶发退化（全 NaN / 全 False）"。
-    `.copy()` 会在这一次调用里把值真正读出来一遍 —— 若该假设成立，可消除异常；
-    若异常照旧，则说明根因不在这里（那就保留它也无害：引擎从此拿到的是私有副本）。
+    Why the check: an incomplete bulk copy would corrupt the panel at the source, and every
+    later computation would then be a faithful execution on bad input (PITFALLS #23/#24).
+    We compare the NaN pattern (cheap, catches unwritten regions) plus sampled values.
     """
-    return {k: v.copy() for k, v in panels.items()}
+    out = {}
+    for k, v in panels.items():
+        c = v.copy()
+        a, b = v.to_numpy(), c.to_numpy()
+        if not np.array_equal(np.isnan(a), np.isnan(b)):
+            raise AssertionError(
+                f"panel copy '{k}': NaN pattern changed after copy -- incomplete copy (PITFALLS #23)")
+        step = max(1, a.size // 200_000)
+        if not np.array_equal(a.ravel()[::step], b.ravel()[::step], equal_nan=True):
+            raise AssertionError(
+                f"panel copy '{k}': sampled values differ after copy -- incomplete copy (PITFALLS #23)")
+        out[k] = c
+    return out
 
 
 def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, full=None):

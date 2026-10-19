@@ -67,18 +67,18 @@ def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲�
 
 
 def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Path = OUT,
-                 val_basis: str = "close", note: str = "") -> dict:
+                 val_basis: str = "close", note: str = "", factor_val=None) -> dict:
     layer_tab = MT.layer_table(nav_df, res, rf=rf)
     ls = MT.ls_summary(nav_df, rdates)
 
-    factor_val = None
     ic = ic_sum = None
     if panels is not None and factor is not None:
-        from backtest.assemble import build_features
-        from backtest.factors import FACTORS
-        spec = FACTORS[factor]
-        factor_val = spec["fn"](build_features(
-            panels, [factor]), {}) * spec["sign"]
+        if factor_val is None:                     # not provided -> compute it once (legacy path)
+            from backtest.assemble import build_features
+            from backtest.factors import FACTORS
+            spec = FACTORS[factor]
+            factor_val = spec["fn"](build_features(
+                panels, [factor]), {}) * spec["sign"]
         ic = MT.rank_ic(factor_val, panels, rdates)
         ic_sum = MT.ic_summary(ic)
     stamp = pd.Timestamp.today().strftime(

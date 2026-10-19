@@ -9,40 +9,50 @@ from loguru import logger
 
 def build_target_weights(factor, rdates, can_trade, n_layers=5):
     cols = factor.columns
-    # —— 健康度断言（2026-10-13）：把"数据退化"变成响亮失败，而不是静默算错 ——
+    # --- health asserts (2026-10-13): data degradation must fail loudly ---
     _ct = can_trade.to_numpy()
     assert _ct.size and _ct.any(
-    ), f"can_trade 全 False（{can_trade.shape}）—— 数据退化，拒绝计算权重"
-    if _ct.shape[1] > 1000:                            # 全市场面板才做区间校验（合成小面板会越界）
+    ), f"can_trade all False ({can_trade.shape}) -- data degraded, refusing to compute weights"
+    if _ct.shape[1] > 1000:
         _r = float(_ct.mean())
-        assert 0.4 < _r < 0.95, f"can_trade True 占比 {_r:.3f} 越界（健康值 ≈0.73）—— 数据可疑"
-    layers = pd.DataFrame(-1, index=rdates, columns=cols, dtype="int8")
-    W = [pd.DataFrame(0.0, index=rdates, columns=cols, dtype="float32")
-         for _ in range(n_layers)]
-    for dt in rdates:
-        if dt not in factor.index or dt not in can_trade.index:
-            continue
-        v = factor.loc[dt]
-        ok = can_trade.loc[dt].fillna(False) & v.notna()
-        tickers = v.index[ok]
-        if len(tickers) == 0:
-            continue
-        n = len(tickers)
-        r = rank1d(v[tickers].to_numpy())   # explicit stable ranks (bypass pandas sort; PITFALLS #23)
-        layer = ((r - 1) * n_layers // n).astype("int8")
-        layers.loc[dt, tickers] = layer
+        assert 0.4 < _r < 0.95, f"can_trade True ratio {_r:.3f} out of range (healthy ~0.73) -- data suspect"
 
+    # --- pure numpy core: no pandas row-level .loc inside the loop (PITFALLS #23) ---
+    # One reindex each, then C-contiguous snapshots; everything after this is numpy.
+    F = np.ascontiguousarray(
+        factor.reindex(index=rdates, columns=cols).to_numpy(dtype="float64", copy=True))
+    C = np.ascontiguousarray(
+        can_trade.reindex(index=rdates, columns=cols).fillna(False).to_numpy(dtype=bool, copy=True))
+
+    nT, nN = F.shape
+    LAY = np.full((nT, nN), -1, dtype="int8")
+    Wn = [np.zeros((nT, nN), dtype="float32") for _ in range(n_layers)]
+    for i in range(nT):
+        v = F[i]
+        idx = np.flatnonzero(C[i] & np.isfinite(v))
+        n = idx.size
+        if n == 0:
+            continue
+        order = np.argsort(v[idx], kind="stable")
+        r = np.empty(n, dtype="float64")
+        r[order] = np.arange(1, n + 1, dtype="float64")
+        layer = ((r - 1) * n_layers // n).astype("int8")
+        LAY[i, idx] = layer
         for L in range(n_layers):
-            members = tickers[layer == L]
-            if len(members):
-                W[L].loc[dt, members] = np.float32(1.0 / len(members))
-    _un = int((layers.to_numpy() == -1).sum()
-              )                              # 未入层的格子数
-    _wmin = min(float(W[L].sum(axis=1).min())
-                for L in range(len(W)))       # W 每行权重和的最小值
-    _empty = sum(1 for L in range(len(W)) if float(
-        W[L].to_numpy().sum()) == 0.0)
-    logger.info(f"wts 未入层:{_un} 空层:{int(_empty)} W行和min:{_wmin:.4f}")
+            sel = idx[layer == L]
+            if sel.size:
+                Wn[L][i, sel] = np.float32(1.0 / sel.size)
+
+    ix = pd.Index(rdates)
+    layers = pd.DataFrame(LAY, index=ix, columns=cols)
+    W = [pd.DataFrame(w, index=ix, columns=cols) for w in Wn]
+    for _L in range(len(W)):
+        W[_L].attrs["np"] = Wn[_L]        # hand the raw ndarray to the engine: zero extra copy
+
+    _un = int((LAY == -1).sum())
+    _wmin = min(float(w.sum(axis=1).min()) for w in Wn)
+    _empty = sum(1 for w in Wn if float(w.sum()) == 0.0)
+    logger.info(f"wts unlayered:{_un} empty_layers:{int(_empty)} w_rowsum_min:{_wmin:.4f}")
     return W, layers
 
 

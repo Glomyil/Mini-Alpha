@@ -10,6 +10,14 @@ def listed(panels):  # 此函数用于检查已有缓存数据是否正常，所
     return ok.cummax() & ok[::-1].cummax()[::-1]
 
 
+def _listed_np(panels):
+    """Same semantics as listed(), but pure numpy (no 15.5M-cell pandas cummax chain)."""
+    a = panels["hfq_close"].notna().to_numpy()
+    fwd = np.maximum.accumulate(a, axis=0)
+    bwd = np.maximum.accumulate(a[::-1], axis=0)[::-1]
+    return fwd & bwd
+
+
 def ret(panels, n):  # 此函数用于校验日收益率变动，即今天收益相较于前一天收益波动的程度
     if n == 1:
         return panels["ret_1d_hfq"].copy()
@@ -22,7 +30,8 @@ def ret(panels, n):  # 此函数用于校验日收益率变动，即今天收益
     out[n:] = px[n:] / px[:-n] - 1.0
     r = pd.DataFrame(out, index=panels["hfq_close"].index,
                      columns=panels["hfq_close"].columns)
-    f = r.where(listed(panels)).astype("float32")
+    f = pd.DataFrame(np.where(_listed_np(panels), out, np.nan).astype("float32"),
+                     index=panels["hfq_close"].index, columns=panels["hfq_close"].columns)
     # 精确不变量：预热 n 行必须全 NaN（同时给 where/astype 也上一道保险）
     _bad = int(f.iloc[:n].notna().to_numpy().sum())
     assert _bad == 0, f"ret({n}) 预热 {n} 行出现 {_bad} 个非 NaN —— 数据退化（PITFALLS #23），拒绝回测"
@@ -33,17 +42,85 @@ def ret(panels, n):  # 此函数用于校验日收益率变动，即今天收益
     return f
 
 
-def vol(panels, n):  # 计算波动率，即用一天收益率变化率用标准差公式计算
-    return panels["ret_1d_hfq"].rolling(n, min_periods=n).std().astype("float32")
+def _roll(x, n, how):
+    """Rolling mean/std over axis 0, pure numpy, O(T*N) memory (no 3-D temporaries).
+
+    how: "mean" | "std" (ddof=1). A window containing any NaN yields NaN (pandas min_periods=n).
+    Computed with cumsum so peak memory stays ~O(T*N) instead of O(T*N*n) -- the old
+    sliding-window version allocated ~2.5 GB per call (PITFALLS #24).
+    """
+    x = np.asarray(x, dtype="float64")
+    T, N = x.shape
+    out = np.full((T, N), np.nan, dtype="float64")
+    if T < n:
+        return out
+
+    def wsum(a):
+        c = np.cumsum(a, axis=0)
+        c = np.vstack([np.zeros((1, a.shape[1])), c])
+        return c[n:] - c[:-n]
+
+    # inf (amount == 0 divides by zero) must count as INVALID: feeding it into cumsum
+    # poisons every later window (inf - inf = NaN). Downstream isfinite filtering makes
+    # inf and NaN equivalent, so this matches the old pandas behaviour for the factor.
+    ok = np.isfinite(x)
+    v = np.where(ok, x, 0.0)
+    s1 = wsum(v)
+    valid = wsum(ok.astype("float64")) == n
+    if how == "mean":
+        res = s1 / n
+    else:
+        s2 = wsum(v * v)
+        var = (s2 - s1 * s1 / n) / (n - 1)
+        res = np.sqrt(np.where(var < 0, 0.0, var))
+    out[n - 1:] = np.where(valid, res, np.nan)
+    return out
 
 
-def ma_dev(panels, n):  # 计算日收益偏差均值的程度，即用日收益除以日收益均值减一的结果
-    f = panels["hfq_close"].ffill()
-    return (f/f.rolling(n, min_periods=n).mean()-1).where(listed(panels)).astype("float32")
+def _warm(fn, f, n):
+    """Warm-up invariant + fingerprint, same discipline as ret().
+
+    A rolling(n) window can only produce its first value at row index n-1, so the warm-up
+    region is the first n-1 rows (ret() is a different construction: its first n rows are NaN).
+    """
+    warm = n - 1
+    arr = f.to_numpy()
+    _bad = int(f.iloc[:warm].notna().to_numpy().sum())
+    assert _bad == 0, (f"{fn.__name__}({n}) warm-up: {_bad} non-NaN in first {warm} rows "
+                       f"-- data degraded (PITFALLS #23), refusing to continue")
+    logger.info(f"feat {fn.__name__}({n}) fp:{hashlib.md5(arr.tobytes()).hexdigest()[:8]} "
+                f"nonnan:{int(np.count_nonzero(~np.isnan(arr)))} warmup_bad:{_bad}")
 
 
-def amihud(panels, n):  # 计算流动性指标，即用一天收益率变化除以一天成交量，然后求出平均值，平均值越大代表单次成交对整体价格的影响大，即流动性低
-    return (panels["ret_1d_hfq"].abs()/panels["amount"]).rolling(n, min_periods=n).mean().astype("float32")
+def vol(panels, n):
+    px = panels["ret_1d_hfq"]
+    out = _roll(px.to_numpy(), n, "std")
+    f = pd.DataFrame(out.astype("float32"), index=px.index, columns=px.columns)
+    _warm(vol, f, n)
+    return f
+
+
+def ma_dev(panels, n):
+    px = panels["hfq_close"].ffill()
+    num = px.to_numpy(dtype="float64")
+    m = _roll(num, n, "mean")
+    out = np.full(num.shape, np.nan, dtype="float64")
+    np.divide(num, m, out=out)
+    out -= 1.0
+    f = pd.DataFrame(out.astype("float32"), index=px.index, columns=px.columns)
+    _arr = np.where(_listed_np(panels), out, np.nan)
+    f = pd.DataFrame(_arr.astype("float32"), index=px.index, columns=px.columns)
+    _warm(ma_dev, f, n)
+    return f
+
+
+def amihud(panels, n):
+    px = panels["ret_1d_hfq"]
+    x = (px.abs() / panels["amount"]).to_numpy()
+    out = _roll(x, n, "mean")
+    f = pd.DataFrame(out.astype("float32"), index=px.index, columns=px.columns)
+    _warm(amihud, f, n)
+    return f
 
 
 FEATURES = {"ret": ret, "vol": vol, "ma_dev": ma_dev, "amihud": amihud}

@@ -4,20 +4,50 @@ import pandas as pd
 from loguru import logger
 
 
+_PANEL_SNAP = {}
+
+
+def _panel_arrays(panels, cols):
+    """Convert + validate the three big panel tables ONCE per process (was once per factor).
+
+    Verification matters: an incomplete snapshot made nav_pre too small, which showed up as
+    turnover ~5 instead of ~100 (PITFALLS #24). Caching also removes 17 of 18 copies.
+    """
+    key = (id(panels["hfq_close"]), id(panels["hfq_open"]), id(panels["can_trade"]), len(cols))
+    if _PANEL_SNAP.get("key") == key:
+        return _PANEL_SNAP["op"], _PANEL_SNAP["vl"], _PANEL_SNAP["ct"]
+
+    op = np.ascontiguousarray(panels["hfq_open"].to_numpy())
+    _cl = np.ascontiguousarray(panels["hfq_close"].to_numpy())
+    _idx = np.where(~np.isnan(_cl), np.arange(_cl.shape[0])[:, None], 0)
+    np.maximum.accumulate(_idx, axis=0, out=_idx)
+    vl = np.take_along_axis(_cl, _idx, axis=0)          # numpy ffill (== pandas .ffill())
+    ct = np.ascontiguousarray(panels["can_trade"].to_numpy())
+
+    assert op.shape == vl.shape == ct.shape, "panel arrays have inconsistent shapes"
+    _m = float(ct.mean())
+    assert 0.4 < _m < 0.95, f"can_trade True ratio {_m:.3f} out of range -- snapshot degraded"
+    assert float(np.isfinite(op).mean()) > 0.3, "hfq_open mostly non-finite -- snapshot degraded"
+    assert float(np.isfinite(vl).mean()) > 0.3, "hfq_close ffill mostly non-finite -- snapshot degraded"
+
+    _PANEL_SNAP.update(key=key, op=op, vl=vl, ct=ct)
+    return op, vl, ct
+
+
 def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, slippage=0.0005, init_cash=1.0):
     days = panels["hfq_close"].index
     cols = W_layer.columns
     # 入口全部走 numpy（2026-10-13 改）：不再用 pandas 的 `[cols]` / `.eq(True)` / `.copy()` 链
     # —— 那条链被实测到会**偶发**产出"形状正确、dtype 正确、但数据全 False"的表（非确定性缺陷）
     # dtype 跟随面板（真实面板 float32 / 合成面板 float64）
-    op = panels["hfq_open"][cols].to_numpy()
-    vl = panels["hfq_close"][cols].ffill().to_numpy()   # 每日收盘估值价
-    # ＝ px_val.shift(1)，dtype 与面板一致
+    # No pandas [cols]/ffill here: that chain is the one observed to occasionally return
+    # shape-correct but value-wrong tables (PITFALLS #23/#24 -> nav_pre too small -> turnover ~5)
+    op, vl, ct = _panel_arrays(panels, cols)
+    # open valuation price: today's open if present, else previous close (pv = vl shifted by 1)
     pv = np.empty_like(vl)
     pv[0] = np.nan
     pv[1:] = vl[:-1]
-    opv = np.where(np.isnan(op), pv, op)                # 开盘估值价（缺则截至上一交易日收盘）
-    ct = panels["can_trade"][cols].to_numpy()           # bool
+    opv = np.where(np.isnan(op), pv, op)   # cached + validated (PITFALLS #24)
 
     # —— 健康度断言（2026-10-13 加 / 2026-10-14 优化）：把"数据退化"变成响亮失败，而不是静默算错 ——
     # 廉价的那条放这里；"扫整表"的三条挪到 exec_days 之后，只查引擎真正用到的那几十行（快 ~20 倍）
@@ -41,60 +71,81 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
         assert _op > 0.3, f"执行日 hfq_open 正价占比 {_op:.3f} 过低（健康值 ≈0.75）—— 价格表退化，拒绝回测"
         assert _vl > 0.3, f"执行日 hfq_close 正价占比 {_vl:.3f} 过低（健康值 ≈0.75）—— 价格表退化，拒绝回测"
 
-    shares = pd.Series(0.0, index=cols)
+    # ---- state: all numpy, no pandas inside the loop (PITFALLS #24) ----
+    n_days = len(days)
+    n_cols = len(cols)
+    n_ex = len(exec_days)
+    shares = np.zeros(n_cols, dtype="float64")
     cash = float(init_cash)
-    nav = pd.Series(np.nan, index=days, dtype="float64")
-    nav_open = pd.Series(np.nan, index=days,
-                         dtype="float64")        # 诊断：每日开盘时刻的账户值
-    nav_pre_s = pd.Series(np.nan, index=exec_days,
-                          dtype="float64")  # 诊断：成交前净值（只在执行日）
-    cash_s = pd.Series(np.nan, index=days, dtype="float64")
-    turnover = pd.Series(0.0, index=exec_days, dtype="float64")
-    fees = pd.Series(0.0, index=exec_days, dtype="float64")
-    trades = pd.DataFrame(0.0, index=exec_days, columns=cols, dtype="float32")
-    shares_hist = pd.DataFrame(
-        0.0, index=exec_days, columns=cols, dtype="float32")
-    n_empty = 0            # 无票可成交的执行日数（按行退化的信号：全局均值可能仍正常）
+    nav_a = np.full(n_days, np.nan, dtype="float64")
+    nav_open_a = np.full(n_days, np.nan, dtype="float64")
+    cash_a = np.full(n_days, np.nan, dtype="float64")
+    nav_pre_a = np.full(n_ex, np.nan, dtype="float64")
+    turnover_a = np.zeros(n_ex, dtype="float64")
+    fees_a = np.zeros(n_ex, dtype="float64")
+    trades_a = np.zeros((n_ex, n_cols), dtype="float32")
+    shares_a = np.zeros((n_ex, n_cols), dtype="float32")
+    n_empty = 0
+
+    # one-shot snapshots so the loop never touches pandas
+    # Prefer the ndarray handed over by build_target_weights: zero copy, so there is no
+    # window in which an incomplete copy could zero/repeat rows (symptom: turnover < 20).
+    Wn = getattr(W_layer, "attrs", {}).get("np")
+    if Wn is not None:
+        Wn = np.ascontiguousarray(Wn)
+    else:
+        Wn = np.nan_to_num(W_layer.to_numpy(dtype="float64", copy=True), nan=0.0)
+    _rs = np.abs(Wn).sum(axis=1)
+    assert float(_rs.min()) > 0.9, (
+        f"W has a bad row (min row sum {float(_rs.min()):.4f}) -- refusing to run the engine")
+    rd_row = {d: i for i, d in enumerate(W_layer.index)}
+    ex_row = {d: k for k, d in enumerate(exec_days)}
 
     for i, dt in enumerate(days):
         if i in exec_pos:
-            w = W_layer.loc[exec_pos[i]].fillna(0.0).to_numpy()
+            k = ex_row[dt]
+            w = Wn[rd_row[exec_pos[i]]]
             tradable = ct[i] & (op[i] > 0.0)
             if not tradable.any():
                 n_empty += 1
             exec_px = np.where(tradable, op[i], np.nan)
             val_px = np.nan_to_num(opv[i])
-            nav_pre = cash + float((shares.to_numpy() * val_px).sum())
-            nav_pre_s.loc[dt] = nav_pre                  # 留痕：成交前净值（对账用）
-            tgt = np.where(np.isnan(exec_px), shares.to_numpy(),
-                           nav_pre*w/np.nan_to_num(exec_px, nan=1.0))
-            delta = tgt - shares.to_numpy()
+            nav_pre = cash + float((shares * val_px).sum())
+            nav_pre_a[k] = nav_pre
+            tgt = np.where(np.isnan(exec_px), shares,
+                           nav_pre * w / np.nan_to_num(exec_px, nan=1.0))
+            delta = tgt - shares
             px0 = np.nan_to_num(exec_px)
-            buy_px = px0*(1+slippage)
-            sold_px = px0*(1-slippage)
-            buy = float((np.clip(delta, 0, None)*buy_px).sum())
-            sell = float((-np.clip(delta, None, 0)*sold_px).sum())
-            fee = buy*fee_buy + sell*fee_sell
-            cash += sell-buy-fee
-            shares = pd.Series(shares.to_numpy()+delta, index=cols)
-            turnover.loc[dt] = 0.5*(buy+sell)/nav_pre if nav_pre > 0 else 0.0
-            fees.loc[dt] = fee
-            trades.loc[dt] = delta.astype("float32")
-            shares_hist.loc[dt] = shares.to_numpy().astype("float32")
-        nav.iloc[i] = cash + \
-            float((shares.to_numpy() * np.nan_to_num(vl[i])).sum())
-        nav_open.iloc[i] = cash + \
-            float((shares.to_numpy() * np.nan_to_num(opv[i])).sum())
-        cash_s.iloc[i] = cash
-    # —— 按行健康度（2026-10-13）：全局均值正常也可能是"执行日那几行"退化 ——
-    # 三段式：严重（>10% 执行日无票可成交）→ 拒绝 · 轻微（1~2 天）→ 留证据 · 正常 → 静默
-    # 实测健康态：执行日里 0 个"无票可成交"（可成交率 99.8%）
+            buy_px = px0 * (1 + slippage)
+            sold_px = px0 * (1 - slippage)
+            buy = float((np.clip(delta, 0, None) * buy_px).sum())
+            sell = float((-np.clip(delta, None, 0) * sold_px).sum())
+            fee = buy * fee_buy + sell * fee_sell
+            cash += sell - buy - fee
+            shares = shares + delta
+            turnover_a[k] = 0.5 * (buy + sell) / nav_pre if nav_pre > 0 else 0.0
+            fees_a[k] = fee
+            trades_a[k] = delta.astype("float32")
+            shares_a[k] = shares.astype("float32")
+        nav_a[i] = cash + float((shares * np.nan_to_num(vl[i])).sum())
+        nav_open_a[i] = cash + float((shares * np.nan_to_num(opv[i])).sum())
+        cash_a[i] = cash
+
+    nav = pd.Series(nav_a, index=days)
+    nav_open = pd.Series(nav_open_a, index=days)
+    cash_s = pd.Series(cash_a, index=days)
+    nav_pre_s = pd.Series(nav_pre_a, index=exec_days)
+    turnover = pd.Series(turnover_a, index=exec_days)
+    fees = pd.Series(fees_a, index=exec_days)
+    trades = pd.DataFrame(trades_a, index=exec_days, columns=cols)
+    shares_hist = pd.DataFrame(shares_a, index=exec_days, columns=cols)
+
     if n_empty > max(2, len(exec_days) // 10):
         raise AssertionError(
-            f"{n_empty}/{len(exec_days)} 个执行日无可成交标的 —— 价格/掩码表按行退化，拒绝交付结果")
+            f"{n_empty}/{len(exec_days)} exec days had no tradable name -- price/mask table degraded by row, refusing")
     if n_empty:
         logger.warning(f"eng n_empty:{n_empty}/{len(exec_days)} "
-                       f"换手:{float(turnover.sum()):.4f} 费用:{float(fees.sum()):.4f}")
+                       f"turnover:{float(turnover.sum()):.4f} fees:{float(fees.sum()):.4f}")
     return {"nav": nav, "nav_open": nav_open, "nav_pre": nav_pre_s, "cash": cash_s,
             "turnover": turnover, "fees": fees, "trades": trades, "shares": shares_hist}
 

@@ -18,8 +18,8 @@ from config.config_manager import config
 import hashlib
 from pathlib import Path
 from backtest.panel import load_panels
-from backtest.assemble import rebalance_dates
-from backtest.weights import weights_for_factor
+from backtest.assemble import build_features, rebalance_dates
+from backtest.weights import build_target_weights, weights_for_factor
 from backtest.engine import run_all_layers, nav_frame
 from backtest.factors import FACTORS
 from backtest import report as RP
@@ -68,7 +68,9 @@ def main():
         if missing:                                               # 软失败：记下来、继续
             print(f"skipped  ⚠ 面板缺 {missing}")
             continue
-        W, _ = weights_for_factor(name, panels, rdates)
+        _spec = FACTORS[name]
+        _fval = _spec["fn"](build_features(panels, [name]), {}) * _spec["sign"]
+        W, _ = build_target_weights(_fval, rdates, panels["can_trade"])
         res = run_all_layers(W, panels, rdates)
         # —— 哨兵（2026-10-13）：结果落在合理区间才放行 ——
         # 依据：6 个因子 × 5 层的实测累计换手都在 44~103；若某层 < 20，多半是"买不进任何票"
@@ -79,7 +81,7 @@ def main():
                 f"layer {low} cumulative turnover < 20 -- result untrusted "
                 f"(possible nondeterministic data corruption, PITFALLS #23); refusing to report")
         out = RP.build_report(name, nav_frame(
-            res), panels, rdates, res, outdir=OUT)
+            res), panels, rdates, res, outdir=OUT, factor_val=_fval)
         print(f"ok  {out['md'].name}")
 
         tv = [float(res[k]["turnover"].sum()) for k in range(len(res))]

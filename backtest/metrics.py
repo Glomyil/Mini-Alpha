@@ -61,39 +61,67 @@ def rank1d(x, ties="first"):
     """
     x = np.asarray(x, dtype="float64")
     order = np.argsort(x, kind="stable")
-    r = np.empty(x.size, dtype="float64")
+    r = np.zeros(x.size, dtype="float64")   # zeros, not empty (PITFALLS #24)
     r[order] = np.arange(1, x.size + 1, dtype="float64")
     if ties == "average":
         xs = x[order]
-        i = 0
-        while i < xs.size:
-            j = i + 1
-            while j < xs.size and xs[j] == xs[i]:
-                j += 1
-            if j - i > 1:
-                r[order[i:j]] = r[order[i:j]].mean()
-            i = j
+        new = np.empty(xs.size, dtype=bool)
+        new[0] = True
+        new[1:] = xs[1:] != xs[:-1]                 # run boundaries (values already sorted)
+        gid = np.cumsum(new) - 1                    # group id per sorted position
+        cnt = np.bincount(gid)
+        s = np.bincount(gid, weights=r[order])      # sum of ranks inside each group
+        r[order] = (s / cnt)[gid]                   # mean rank per element (vectorized)
+
     return r
+
+
+_SNAP = {}   # panel snapshot memo: key -> (C, K)
 
 
 def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> pd.Series:
     close, ok = panels["hfq_close"], panels["can_trade"]
     rdates = list(rdates)
+    # --- pure numpy core: one snapshot, then integer row access (PITFALLS #24) ---
+    # No pandas .loc / .corr inside the loop: per-date row extraction was the last place
+    # where an occasional unwritten-page read could still corrupt the cross-section.
+    cols = close.columns
+    pos = {d: i for i, d in enumerate(close.index)}
+    # cache the big panel snapshots: identical for every factor (PITFALLS #24 perf)
+    key = (id(close), id(ok), close.shape)
+    if _SNAP.get("key") != key:
+        _SNAP["key"] = key
+        _SNAP["C"] = np.ascontiguousarray(close.to_numpy(dtype="float64", copy=True))
+        _SNAP["K"] = np.ascontiguousarray(
+            ok.reindex(columns=cols).fillna(False).to_numpy(dtype=bool, copy=True))
+    C, K = _SNAP["C"], _SNAP["K"]
+    assert list(factor.columns) == list(cols), "factor columns must match panel columns"
+    F = np.ascontiguousarray(factor.to_numpy(dtype="float64", copy=True))
+    ri = np.array([pos.get(d, -1) for d in rdates], dtype=np.int64)
+
     out = {}
-    for t, nxt in zip(rdates[:-1], rdates[1:]):
-        f = factor.loc[t]
-        r = close.loc[nxt] / close.loc[t] - 1.0
-        good = ok.loc[t].eq(True) & f.notna() & r.notna()
+    for i in range(len(rdates) - 1):
+        a, b = int(ri[i]), int(ri[i + 1])
+        if a < 0 or b < 0:
+            continue
+        fv, cv, nv, kv = F[a], C[a], C[b], K[a]
+        with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+            rv = nv / cv - 1.0
+        good = kv & np.isfinite(fv) & np.isfinite(rv)
         k = int(good.sum())
         if k < min_names:
             continue
-        rx = rank1d(np.asarray(f[good], dtype="float64"), ties="average")
-        ry = rank1d(np.asarray(r[good], dtype="float64"), ties="average")
-        val = float(np.corrcoef(rx, ry)[0, 1])       # Spearman = Pearson of ranks (bypasses pandas sort)
+        rx = rank1d(fv[good], ties="average")
+        ry = rank1d(rv[good], ties="average")
+        a = rx - rx.mean()
+        b = ry - ry.mean()
+        den = np.sqrt((a * a).sum() * (b * b).sum())
+        val = float((a * b).sum() / den) if den > 0 else float("nan")
         if not np.isfinite(val):
             raise AssertionError(
-                f"{t.date()} Spearman undefined (constant cross-section / all-NaN) -- data degraded, refusing to report (PITFALLS #23)")
-        out[t] = val
+                f"{rdates[i].date()} Spearman undefined (constant cross-section / all-NaN) "
+                f"-- data degraded, refusing to report (PITFALLS #23)")
+        out[rdates[i]] = val
     return pd.Series(out, name="rank_ic", dtype="float64")
 
 
