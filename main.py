@@ -75,7 +75,9 @@ def main():
         low = [L for L in range(len(res)) if float(
             res[L]["turnover"].sum()) < 20.0]
         if low:
-            print(f"    ⚠ 结果可疑：层 {low} 累计换手 < 20 —— 本次运行的数字不可信，请重跑并比对")
+            raise AssertionError(
+                f"layer {low} cumulative turnover < 20 -- result untrusted "
+                f"(possible nondeterministic data corruption, PITFALLS #23); refusing to report")
         out = RP.build_report(name, nav_frame(
             res), panels, rdates, res, outdir=OUT)
         print(f"ok  {out['md'].name}")
@@ -83,7 +85,7 @@ def main():
         tv = [float(res[k]["turnover"].sum()) for k in range(len(res))]
         logger.info(f"{name} | 层0换手 {tv[0]:.4f} | 层4换手 {tv[-1]:.4f} "
                     f"| 多空 {out['ls']['比值法']:.4f} | IC {out['ic_summary']['ic_mean']:.4f} "
-                    f"| n {out['ic_summary']['n']}")
+                    f"| ICvalid {out['ic_summary']['n']} ICbad {out['ic_summary']['n_bad']}")
     logger.complete()          # 异步写：确保退出前把队列里的行落盘（日志教学参考 §8）
 
 

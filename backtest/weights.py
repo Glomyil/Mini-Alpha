@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from backtest.assemble import build_features, rebalance_dates
 from backtest.factors import FACTORS
+from backtest.metrics import rank1d
 from loguru import logger
 
 
@@ -27,8 +28,8 @@ def build_target_weights(factor, rdates, can_trade, n_layers=5):
         if len(tickers) == 0:
             continue
         n = len(tickers)
-        r = v[tickers].rank(method="first")
-        layer = ((r.to_numpy()-1)*n_layers//n).astype("int8")
+        r = rank1d(v[tickers].to_numpy())   # explicit stable ranks (bypass pandas sort; PITFALLS #23)
+        layer = ((r - 1) * n_layers // n).astype("int8")
         layers.loc[dt, tickers] = layer
 
         for L in range(n_layers):

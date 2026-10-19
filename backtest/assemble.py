@@ -6,8 +6,6 @@ from backtest.panel import load_panels
 from backtest.features import FEATURES
 from backtest.factors import FACTORS
 
-FACTOR_LIST = sys.argv[1:] or list(FACTORS)   # 不带参数 = 全跑；带参数 = 只测这几个（命令行入口）
-
 
 def build_features(panels, factor_names, cache=None):
     cache = {} if cache is None else cache
@@ -63,6 +61,7 @@ def factor_corr(feats, factor_names, dates, min_names=30):  # 注：实际上进
 
 
 def main():
+    FACTOR_LIST = sys.argv[1:] or list(FACTORS)
     t0 = time.time()
     panels = load_panels()
     print(f"面板 {panels['hfq_close'].shape}   用时 {time.time() - t0:.1f}s")

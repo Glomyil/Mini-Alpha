@@ -53,6 +53,29 @@ def fee_total(fees: pd.Series) -> float:
     return float(fees.sum())
 
 
+def rank1d(x, ties="first"):
+    """Explicit ranks 1..n.
+
+    ties="first"   -> pandas rank(method="first")   (used for layer assignment)
+    ties="average" -> pandas rank(method="average") (textbook Spearman, used for IC)
+    """
+    x = np.asarray(x, dtype="float64")
+    order = np.argsort(x, kind="stable")
+    r = np.empty(x.size, dtype="float64")
+    r[order] = np.arange(1, x.size + 1, dtype="float64")
+    if ties == "average":
+        xs = x[order]
+        i = 0
+        while i < xs.size:
+            j = i + 1
+            while j < xs.size and xs[j] == xs[i]:
+                j += 1
+            if j - i > 1:
+                r[order[i:j]] = r[order[i:j]].mean()
+            i = j
+    return r
+
+
 def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> pd.Series:
     close, ok = panels["hfq_close"], panels["can_trade"]
     rdates = list(rdates)
@@ -61,21 +84,31 @@ def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> 
         f = factor.loc[t]
         r = close.loc[nxt] / close.loc[t] - 1.0
         good = ok.loc[t].eq(True) & f.notna() & r.notna()
-        if int(good.sum()) < min_names:
+        k = int(good.sum())
+        if k < min_names:
             continue
-        out[t] = float(f[good].corr(r[good], method="spearman"))
+        rx = rank1d(np.asarray(f[good], dtype="float64"), ties="average")
+        ry = rank1d(np.asarray(r[good], dtype="float64"), ties="average")
+        val = float(np.corrcoef(rx, ry)[0, 1])       # Spearman = Pearson of ranks (bypasses pandas sort)
+        if not np.isfinite(val):
+            raise AssertionError(
+                f"{t.date()} Spearman undefined (constant cross-section / all-NaN) -- data degraded, refusing to report (PITFALLS #23)")
+        out[t] = val
     return pd.Series(out, name="rank_ic", dtype="float64")
 
 
 def ic_summary(ic: pd.Series) -> dict:
-    n = len(ic)
+    n = int(ic.notna().sum())            # valid periods (DEBT-013: len(ic) used to count NaN periods too)
+    n_bad = int(len(ic) - n)             # invalid periods
     if n == 0:
-        return {"ic_mean": float("nan"), "ic_std": float("nan"), "ic_ir": float("nan"), "n": 0}
+        return {"ic_mean": float("nan"), "ic_std": float("nan"),
+                "ic_ir": float("nan"), "n": 0, "n_bad": n_bad}
+    ic = ic.dropna()
     sd = float(ic.std(ddof=1))
     return {"ic_mean": float(ic.mean()),
             "ic_std": sd,
             "ic_ir": float(ic.mean() / sd * np.sqrt(REBALANCE_PERIODS_PER_YEAR)) if sd else float("nan"),
-            "n": n}
+            "n": n, "n_bad": n_bad}
 
 
 def ls_ratio(nav_long: pd.Series, nav_short: pd.Series) -> float:
