@@ -77,6 +77,18 @@ def main():
         low = [L for L in range(len(res)) if float(
             res[L]["turnover"].sum()) < 20.0]
         if low:
+
+            try:
+                _W0 = W[0].to_numpy(dtype="float64"); _rs = _W0.sum(axis=1)
+                logger.warning(f"DIAG W[0] rowsum {_rs.min():.4f}/{_rs.max():.4f} nnz/row {( _W0 != 0).sum(axis=1).mean():.0f}")
+                for _L in range(len(res)):
+                    _tv = res[_L]["turnover"].to_numpy(); _tr = res[_L]["trades"].to_numpy()
+                    _sh = res[_L]["shares"].to_numpy()
+                    logger.warning(f"DIAG L{_L}: tv_sum {_tv.sum():.4f} tv_nz {int((_tv > 0).sum())}/{len(_tv)} "
+                                   f"trades_nnz {int((_tr != 0).sum())} shares_last_nnz {int((_sh[-1] != 0).sum())} "
+                                   f"nav_end {float(res[_L]['nav'].iloc[-1]):.6f}")
+            except Exception as _e:
+                logger.warning(f"DIAG failed: {_e}")
             raise AssertionError(
                 f"layer {low} cumulative turnover < 20 -- result untrusted "
                 f"(possible nondeterministic data corruption, PITFALLS #23); refusing to report")
