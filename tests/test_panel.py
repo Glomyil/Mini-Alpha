@@ -167,14 +167,24 @@ def write_fixture(dst, codes):
             "is_suspended": pd.Series([r[4] for r in rows], dtype="int8"),
             # ➕ is_price_bad 用 float64：B 的 01-08 故意放 NaN，测"NaN 判不可交易"
             "is_price_bad": [r[5] for r in rows],
+            # ➕ amount：panel.FIELDS 里后来加了 amount（amihud 要用），夹具必须提供
+            "amount": [float(1000 * (i + 1)) for i in range(len(rows))],
         })
+        # amount==0 的行必须同时不可交易，否则 engine 的"0 价/0 额可交易"断言会拦
+        # 这里 amount 恒为正，所以不会触发；留一行注释说明约束即可。
         p = dst / f"{code}.parquet"
         df.to_parquet(p, index=False)
         out.append(p)
     return out
 
 
-TMP = Path(tempfile.mkdtemp(prefix="panel_fixture_"))
+# 固定目录，不用 mkdtemp：某些受限环境不允许在"新建的随机目录"里再建子目录
+# （实测 mkdtemp 返回的路径下 mkdir 会被拒绝）。固定路径哪儿都能跑，也方便看残留。
+import shutil
+
+TMP = Path(__file__).resolve().parents[1] / "logs" / "tmp_panel_fixture"
+shutil.rmtree(TMP, ignore_errors=True)
+TMP.mkdir(parents=True, exist_ok=True)
 FX, CACHE_T = TMP / "src", TMP / "cache"
 write_fixture(FX, ["sh.600000", "sz.000001", "sz.300001"])
 FILES3 = sorted(FX.glob("*.parquet"))

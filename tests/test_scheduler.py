@@ -87,8 +87,8 @@ check(len(lp) == 1 and fors and lp[0].lineno < min(n.lineno for n in fors),
 
 print("── B. 功能检查（真数据，约 15 秒）──")
 panels = load_panels()
-check(sorted(panels) == ["can_trade", "hfq_close", "hfq_open", "ret_1d_hfq"],
-      f"面板 4 张表：{sorted(panels)}")
+check(sorted(panels) == ["amount", "can_trade", "hfq_close", "hfq_open", "ret_1d_hfq"],
+      f"面板 5 张表：{sorted(panels)}")
 check(panels["hfq_close"].shape == (2839, 5471), f"面板形状 {panels['hfq_close'].shape}")
 
 rdates = [d for d in rebalance_dates(panels["hfq_close"].index) if d.year >= SINCE]
@@ -96,9 +96,11 @@ check(len(rdates) == 129, f"调仓日 {len(rdates)} 个（期望 129）")
 check(all(d.year >= SINCE for d in rdates), "全部 ≥ 2016（含 2016 本身，不是 >）")
 check(all(d in panels["hfq_close"].index for d in rdates), "调仓日都是面板里的真实交易日")
 
-feats_amihud = build_features(panels, ["amihud_20d"])
+# 软失败用例：真的把 amount 摘掉，才能验证"缺表 ⇒ 返回空 dict 而不是抛异常"
+panels_noamt = {k: v for k, v in panels.items() if k != "amount"}
+feats_amihud = build_features(panels_noamt, ["amihud_20d"])
 check(feats_amihud == {}, "软失败：amihud_20d 缺 amount → 返回空 dict（不抛异常）")
-check([t for t in FACTORS["amihud_20d"].get("requires", []) if t not in panels] == ["amount"],
+check([t for t in FACTORS["amihud_20d"].get("requires", []) if t not in panels_noamt] == ["amount"],
       "缺的表就是 ['amount']（调度里会被记成 skipped）")
 
 W, layers = weights_for_factor(FACTOR, panels, rdates)

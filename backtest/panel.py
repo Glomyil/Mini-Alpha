@@ -84,6 +84,17 @@ def _materialize(panels: dict) -> dict:
     return out
 
 
+def _check_prices(panels: dict) -> None:
+
+    c = panels["hfq_close"].to_numpy()
+    o = panels["hfq_open"].to_numpy()
+    ct = panels["can_trade"].to_numpy()
+    z = int(((c == 0) & ct).sum() + ((o == 0) & ct).sum())
+    assert z == 0, f"{z} 个格子既 0 价又标记可交易 —— 价格表/掩码表打架，拒绝载入"
+    neg = int((c < 0).sum() + (o < 0).sum())
+    assert neg == 0, f"{neg} 个负价格 —— 数据非法，拒绝载入"
+
+
 def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, full=None):
     src, cache = Path(src or SRC), Path(cache or CACHE)      # 后三个只为测试注入
     files = sorted(src.glob("*.parquet"))
@@ -106,6 +117,7 @@ def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, f
                 meta["rows"], meta["cols"]), "缓存被改坏了"
             # 命中缓存（快路径）
             logger.info(f"panel hit shape:{panels['hfq_close'].shape}")
+            _check_prices(panels)
             return panels
 
     panels = build_panels(files)                                        # 重建
@@ -125,6 +137,7 @@ def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, f
             encoding="utf-8")
     logger.info(
         f"panel build shape:{panels['hfq_close'].shape} codes:{len(files)}")
+    _check_prices(panels)
     return panels
 
 

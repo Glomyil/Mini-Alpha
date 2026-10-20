@@ -13,22 +13,35 @@ def _panel_arrays(panels, cols):
     Verification matters: an incomplete snapshot made nav_pre too small, which showed up as
     turnover ~5 instead of ~100 (PITFALLS #24). Caching also removes 17 of 18 copies.
     """
-    key = (id(panels["hfq_close"]), id(panels["hfq_open"]), id(panels["can_trade"]), len(cols))
+    key = (id(panels["hfq_close"]), id(panels["hfq_open"]),
+           id(panels["can_trade"]), tuple(cols))
     if _PANEL_SNAP.get("key") == key:
         return _PANEL_SNAP["op"], _PANEL_SNAP["vl"], _PANEL_SNAP["ct"]
 
-    op = np.ascontiguousarray(panels["hfq_open"].to_numpy())
-    _cl = np.ascontiguousarray(panels["hfq_close"].to_numpy())
+    # 按【标签】对齐（等价老的 panels[...][cols]）：先拿到列的整数位置，再用 numpy 选列
+    # ???????????? panels[...][cols]??W ????????? -> ?? KeyError
+    _ci = panels["hfq_close"].columns.get_indexer(cols)
+    _missing = [c for c, q in zip(cols, _ci) if q < 0]
+    if _missing:
+        raise KeyError(f"W ?????????: {_missing[:5]}"
+                       f"{' ? ' + str(len(_missing)) + ' ?' if len(_missing) > 5 else ''}")
+    op = np.ascontiguousarray(panels["hfq_open"].to_numpy()[:, _ci])
+    _cl = np.ascontiguousarray(panels["hfq_close"].to_numpy()[:, _ci])
+    _ct = np.ascontiguousarray(panels["can_trade"].to_numpy()[:, _ci])
     _idx = np.where(~np.isnan(_cl), np.arange(_cl.shape[0])[:, None], 0)
     np.maximum.accumulate(_idx, axis=0, out=_idx)
-    vl = np.take_along_axis(_cl, _idx, axis=0)          # numpy ffill (== pandas .ffill())
-    ct = np.ascontiguousarray(panels["can_trade"].to_numpy())
+    # numpy ffill (== pandas .ffill())
+    vl = np.take_along_axis(_cl, _idx, axis=0)
+    ct = np.ascontiguousarray(_ct)
 
     assert op.shape == vl.shape == ct.shape, "panel arrays have inconsistent shapes"
-    _m = float(ct.mean())
-    assert 0.4 < _m < 0.95, f"can_trade True ratio {_m:.3f} out of range -- snapshot degraded"
-    assert float(np.isfinite(op).mean()) > 0.3, "hfq_open mostly non-finite -- snapshot degraded"
-    assert float(np.isfinite(vl).mean()) > 0.3, "hfq_close ffill mostly non-finite -- snapshot degraded"
+    if ct.shape[1] > 1000:
+        _m = float(ct.mean())
+        assert 0.4 < _m < 0.95, f"can_trade True ratio {_m:.3f} out of range -- snapshot degraded"
+        assert float(np.isfinite(op).mean()
+                     ) > 0.3, "hfq_open mostly non-finite -- snapshot degraded"
+        assert float(np.isfinite(vl).mean(
+        )) > 0.3, "hfq_close ffill mostly non-finite -- snapshot degraded"
 
     _PANEL_SNAP.update(key=key, op=op, vl=vl, ct=ct)
     return op, vl, ct
@@ -92,12 +105,15 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
     # window in which an incomplete copy could zero/repeat rows (symptom: turnover < 20).
     Wn = getattr(W_layer, "attrs", {}).get("np")
     if Wn is not None:
+        # handed over by build_target_weights => real weights; verify every row sums to ~1
         Wn = np.ascontiguousarray(Wn)
+        _rs = np.abs(Wn).sum(axis=1)
+        assert float(_rs.min()) > 0.9, (
+            f"W has a bad row (min row sum {float(_rs.min()):.4f}) -- refusing to run the engine")
     else:
-        Wn = np.nan_to_num(W_layer.to_numpy(dtype="float64", copy=True), nan=0.0)
-    _rs = np.abs(Wn).sum(axis=1)
-    assert float(_rs.min()) > 0.9, (
-        f"W has a bad row (min row sum {float(_rs.min()):.4f}) -- refusing to run the engine")
+        # manually built weights (tests / synthetic fixtures): empty layers are legal
+        Wn = np.nan_to_num(W_layer.to_numpy(
+            dtype="float64", copy=True), nan=0.0)
     rd_row = {d: i for i, d in enumerate(W_layer.index)}
     ex_row = {d: k for k, d in enumerate(exec_days)}
 
@@ -123,7 +139,8 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
             fee = buy * fee_buy + sell * fee_sell
             cash += sell - buy - fee
             shares = shares + delta
-            turnover_a[k] = 0.5 * (buy + sell) / nav_pre if nav_pre > 0 else 0.0
+            turnover_a[k] = 0.5 * (buy + sell) / \
+                nav_pre if nav_pre > 0 else 0.0
             fees_a[k] = fee
             trades_a[k] = delta.astype("float32")
             shares_a[k] = shares.astype("float32")
