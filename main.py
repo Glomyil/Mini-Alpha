@@ -61,6 +61,10 @@ def main():
                 f"shape:{panels['hfq_close'].shape}")
     rdates = [d for d in rebalance_dates(
         panels["hfq_close"].index) if d.year >= SINCE]
+
+    logger.info(f"RUN SINCE:{SINCE} 首个调仓日:{rdates[0].date()} 调仓:{len(rdates)}期 "
+                f"因子:{len(FACTORS)} panel:{_fp} shape:{panels['hfq_close'].shape}")
+
     for i, name in enumerate(FACTORS, 1):
         print(f"[{i}/{len(FACTORS)}] {name} …", end=" ", flush=True)
         missing = [t for t in FACTORS[name].get(
@@ -77,12 +81,14 @@ def main():
         low = [L for L in range(len(res)) if float(
             res[L]["turnover"].sum()) < 20.0]
         if low:
-
             try:
-                _W0 = W[0].to_numpy(dtype="float64"); _rs = _W0.sum(axis=1)
-                logger.warning(f"DIAG W[0] rowsum {_rs.min():.4f}/{_rs.max():.4f} nnz/row {( _W0 != 0).sum(axis=1).mean():.0f}")
+                _W0 = W[0].to_numpy(dtype="float64")
+                _rs = _W0.sum(axis=1)
+                logger.warning(
+                    f"DIAG W[0] rowsum {_rs.min():.4f}/{_rs.max():.4f} nnz/row {(_W0 != 0).sum(axis=1).mean():.0f}")
                 for _L in range(len(res)):
-                    _tv = res[_L]["turnover"].to_numpy(); _tr = res[_L]["trades"].to_numpy()
+                    _tv = res[_L]["turnover"].to_numpy()
+                    _tr = res[_L]["trades"].to_numpy()
                     _sh = res[_L]["shares"].to_numpy()
                     logger.warning(f"DIAG L{_L}: tv_sum {_tv.sum():.4f} tv_nz {int((_tv > 0).sum())}/{len(_tv)} "
                                    f"trades_nnz {int((_tr != 0).sum())} shares_last_nnz {int((_sh[-1] != 0).sum())} "
@@ -92,15 +98,22 @@ def main():
             raise AssertionError(
                 f"layer {low} cumulative turnover < 20 -- result untrusted "
                 f"(possible nondeterministic data corruption, PITFALLS #23); refusing to report")
-        out = RP.build_report(name, nav_frame(
-            res), panels, rdates, res, outdir=OUT, factor_val=_fval)
-        print(f"ok  {out['md'].name}")
+        _nav_full = nav_frame(res)
+        _nav = _nav_full.loc[rdates[0]:]  # ★ 唯一的新增：首个成交日之前的空仓期不进指标
+        logger.info(f"nav 切片 {_nav_full.index[0].date()}~{_nav_full.index[-1].date()} "
+                    f"=> 指标起算日 {_nav.index[0].date()} "
+                    f"行数 {len(_nav_full)}→{len(_nav)} (drops {len(_nav_full) - len(_nav)})")
+
+        out = RP.build_report(name, _nav, panels, rdates,
+                              res, outdir=OUT, factor_val=_fval)
 
         tv = [float(res[k]["turnover"].sum()) for k in range(len(res))]
-        logger.info(f"{name} | 层0换手 {tv[0]:.4f} | 层4换手 {tv[-1]:.4f} "
-                    f"| 多空 {out['ls']['比值法']:.4f} | IC {out['ic_summary']['ic_mean']:.4f} "
+        logger.info(f"{name} | 区间 {_nav.index[0].date()} | 层0换手 {tv[0]:.4f} "
+                    f"| 层4换手 {tv[-1]:.4f} | 多空 {out['ls']['比值法']:.4f} "
+                    f"| IC {out['ic_summary']['ic_mean']:.4f} "
                     f"| ICvalid {out['ic_summary']['n']} ICbad {out['ic_summary']['n_bad']}")
-    logger.complete()          # 异步写：确保退出前把队列里的行落盘（日志教学参考 §8）
+
+    logger.complete()          # 异步写：确保退出前把队列里的行落盘
 
 
 def config_check() -> None:

@@ -41,7 +41,7 @@ jobs:
       #   它们的模块级标记是 needs_data，这里会被跳过。
       #   以后新增的纯单元测试放 qa/test_unit_*.py，会自动被收集并在这里跑。
       - name: Data-free tests
-        run: python -m pytest -m "not needs_data" -v
+        run: python -m pytest --ignore=qa/heavy -v
 
       # ③ 说明：需要真数据的那 15 个测试在 CI 上跑不了（数据不进仓库）。
       #    提交前请在你本机跑：python -m pytest

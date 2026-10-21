@@ -6,7 +6,7 @@ import sys
 
 import pytest
 pytestmark = pytest.mark.needs_data
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 TIMEOUT = 420  # 每个脚本最多 7 分钟（有脚本会挂死，比如演示脚本）
 
 # 注意：不要放 test_config_loader —— 它是演示脚本（while True + sleep(3)），永远不结束
