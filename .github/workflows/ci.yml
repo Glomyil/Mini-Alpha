@@ -1,6 +1,5 @@
 name: ci
 
-# 什么时候跑
 on:
   push:
     branches: [main, master]
@@ -8,19 +7,19 @@ on:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    # 钉死版本，不用 ubuntu-latest：
+    # latest 会在 2026-10 迁到 Ubuntu 26 ⇒ 依赖可能装不上 ⇒ 结果不可复现
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      # v5 / v6 跑在 Node 24 上（v4 / v5 的 Node 20 已废弃，会出警告）
+      - uses: actions/checkout@v5
 
-      # Python 版本必须和本地一致 —— 否则"CI 绿了本地红了"会白折腾
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
 
-      # 装依赖：优先用锁定的精确版本（requirements.lock），没有就用 requirements.txt
-      # 锁版本的意义：CI 和本地装的是同一批版本，红/绿才有可比性
       - name: Install deps
         run: |
           python -m pip install -U pip
@@ -32,16 +31,14 @@ jobs:
           pip install pytest
 
       # ① 语法检查（不需要任何数据）
-      #   能抓到：语法错、缩进错、括号没闭合、import 写错路径等
       - name: Syntax check
         run: python -m compileall -q backtest data main.py qa
 
-      # ② 不依赖数据的测试
-      #   注意：qa/test_acceptance.py 里那 17 个验收测试要真面板（727 MB），
-      #   它们的模块级标记是 needs_data，这里会被跳过。
-      #   以后新增的纯单元测试放 qa/test_unit_*.py，会自动被收集并在这里跑。
+      # ② 不需要真实数据的测试：qa/ 下 19 条（16 纯函数 + 3 静态守门）
+      #    qa/heavy/ 要读 727 MB 面板，数据不进仓库 ⇒ 显式忽略
+      #    注意：别用 pytest.ini 的 norecursedirs —— 它会连显式路径也挡掉 ✗
       - name: Data-free tests
         run: python -m pytest --ignore=qa/heavy -v
 
-      # ③ 说明：需要真数据的那 15 个测试在 CI 上跑不了（数据不进仓库）。
-      #    提交前请在你本机跑：python -m pytest
+      # ③ 需要真面板的 19 条（qa/heavy/）在 CI 上跑不了。
+      #    提交前请在本机跑：python -m pytest
