@@ -62,3 +62,15 @@ reports/
 _tmp_*/
 *.log
 reports/
+
+# 个人 SOP，本地维护，不进仓库
+工作流.txt
+
+工作流.txt
+工作流-细则.txt
+
+docs/dev/T-*/
+docs/dev/_skills/
+
+docs/dev/T-*/
+docs/dev/_skills/
