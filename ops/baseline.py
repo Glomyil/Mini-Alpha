@@ -3,6 +3,8 @@ import statistics
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from config.research_spec import load_spec
+
 
 REPORTS = Path("reports")
 BASELINE = Path("BASELINE.md")
@@ -86,6 +88,7 @@ def main():
         raise SystemExit(f"{REPORTS} 里没有 report_*_close.md")
 
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    spec = load_spec()
     rows = []
     for f in cur_files:
         factor = f.stem[len("report_"):-len("_close")]
@@ -93,7 +96,7 @@ def main():
         cur = read_report(f)
         prev = read_report(prev_path) if prev_path.exists() else None
         rows.append(f"| {stamp} | {a.ticket} | {factor} {a.change} | "
-                    f"{diff_text(cur, prev)} | 待人工确认 |")
+                    f"{diff_text(cur, prev)}｜cfg={spec.cfg_hash} | 待人工确认 |")
 
     # ② 定位「## 变更记录」表尾，插入
     lines = BASELINE.read_text(encoding="utf-8").split("\n")

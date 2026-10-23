@@ -24,6 +24,7 @@ from backtest.engine import run_all_layers, nav_frame
 from backtest.factors import FACTORS
 from backtest import report as RP
 from loguru import logger
+from config.research_spec import load_spec, save_snapshot
 
 OUT = Path(__file__).resolve().parent/"reports"
 
@@ -54,7 +55,12 @@ def main():
     # 运行前先证明"这次用的是哪份配置"
     config_check()
     init_log()                                                    # 关键数字落盘（日志教学参考 §5）
-    panels = load_panels()                                        # 缓存提到循环外
+    panels = load_panels()  # 缓存提到循环外
+    spec = load_spec(since=SINCE, until=str(
+        panels["hfq_close"].index[-1].date()))
+    save_snapshot(spec)
+    logger.info(f"RUN {spec.banner()}")
+
     # —— 运行身份（2026-10-14）：这一行让以后的任何一行数字都能回答"哪份代码 + 哪份数据"——
     _fp = hashlib.md5(panels["hfq_close"].to_numpy().tobytes()).hexdigest()[:8]
     logger.info(f"RUN 区间:{SINCE}+ 因子:{len(FACTORS)} panel:{_fp} "

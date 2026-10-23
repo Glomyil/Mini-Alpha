@@ -1,59 +1,20 @@
-# 临时配置（测试用）
-# ========== 这里想怎么写就怎么写，不需要缩进 ==========
-# 字符串直接写，不加引号也行
-app_name: ETF_Quant_System114514
-数据起始日期: 2023-12-114514
-数据结束日期: 2025-12-31
-
-# 数字直接写
-最大并发数: 1678337
-手续费率: 0.00052889
-
-# 列表直接用逗号分隔（不用写 - ）
-ETF池: sh.510300, sh.510050, sh.588000, sz.159919
-
-# 布尔值写 true/false（小写）
-调试模式: false
-
-# 退出开关（测试用）
-退出程序: false
-
-# 想怎么命名都行，中文、特殊符号随意
-风控-最大仓位%: 80
-风控-止损线: 0.05
-# ========== 配置中心测试变量到此为止，下方填写生产交易专用变量 ==========
-##### 铁律：键值对顶格写，冒号后面加空格
-
-# ========== 数据清洗模块参数 ==========
-# 每个模块自带默认参数（写在类属性 DEFAULT_PARAMS 里）
-# 此处只需覆盖研究员想修改的参数，不写的项自动使用类默认值
-# 所有阈值参数上线前必须用历史数据回测验证合理性，不确定的填 null
+# ============================================================
+# Mini-Alpha 配置
+# ============================================================
+# 铁律：键值对顶格写，冒号后面加空格；层级用两空格缩进
+# 命名：模块.参数（ASCII 点号键），代码通过 config.get('stock.fetch.xxx') 读取
 #
-# 完整参数结构（取消注释即可覆盖默认值）：
-#
-# cleaner:
-#   classifier:
-#     enabled: true                   # 是否启用资产类别筛选
-#     include_types: [equity]         # 允许进入清洗的资产类别: equity/qdii/bond/commodity/money_market
-#     force_refresh: false            # true = 跳过缓存，强制重新调用 baostock
-#     use_cache: true                 # 优先读 data/reference/etf_classification.json
-#   suspension:
-#     max_consecutive_nan: 20        # TODO: 需要回测验证 — A股ETF停牌通常≤20交易日，超过视为异常
-#   adjust:
-#     ex_dividend_threshold: 0.03    # TODO: 需要回测验证 — 除权日价格跳空阈值
-#     volume_change_limit: 0.50      # TODO: 需要回测验证 — 除权日成交量变化上限
-#   price:
-#     daily_limit: 0.10              # TODO: 需要回测验证 — A股主板涨跌幅上限
-#   survivorship:
-#     min_history_days: 240          # TODO: 需要回测验证 — A股交易日约240天/年
-#   derived:
-#     volatility_window: 20          # TODO: 需要回测验证 — 波动率滚动窗口（交易日）
-#     volume_ma_window: 20           # TODO: 需要回测验证 — 成交量均线窗口（交易日）
+# 2026-10-23 清理：删掉了 2026 年早期手写的一批测试键
+#   （一个带荒唐数字的 app_name、一个不存在的起始日期、一百六十万并发、
+#     一个离谱的手续费率，以及 ETF池 / 调试模式 / 退出程序 / 风控-* 两行）
+#   它们没有任何代码在读；但 app_name 会被 config_check() 打印进日志。
+#   原始内容见 .tmp/application.yml.bak（本机）与 git 历史。
 
-cleaner: {}
+app_name: Mini-Alpha
 
-# ========== 股票数据模块参数（2026-09-07 新增，A股正式方向） ==========
-# 键名规则：模块.参数；代码通过 config.get('stock.fetch.xxx') 读取
+# ============================================================
+# 数据获取
+# ============================================================
 stock:
   fetch:
     # 行情起始日期（与 ETF 数据区间对齐，2026-09-07 用户确认）
@@ -62,6 +23,31 @@ stock:
     workers: 1
     # 数据源: baostock，落盘 = 不复权价 + 官方后复权因子
     #   hfq 价 = close × back_adj_factor（因子仅在除息/折算日变化）
-  # TODO: 需要回测确定 —— 股票 cleaner 参数（涨跌停分池 10%/20%/5%、
-  #       停牌判定改 tradestatus、ST 标记处理）待 pipeline 阶段细化
-  cleaner: {}
+
+# ============================================================
+# 数据清洗参数（当前全部走类默认值，需要覆盖时再取消注释）
+# ============================================================
+# 每项都写在各模块的类属性 DEFAULT_PARAMS 里；此处只覆盖研究员想改的。
+# 所有阈值上线前必须用历史数据回测验证；不确定的填 null。
+#
+# cleaner:
+#   classifier:
+#     enabled: true                   # 是否启用资产类别筛选
+#     include_types: [equity]         # equity/qdii/bond/commodity/money_market
+#     force_refresh: false            # true = 跳过缓存，强制重新调用 baostock
+#     use_cache: true                 # 优先读 data/reference/etf_classification.json
+#   suspension:
+#     max_consecutive_nan: 20         # TODO: 需要回测验证 — A股ETF停牌通常≤20交易日
+#   adjust:
+#     ex_dividend_threshold: 0.03     # TODO: 需要回测验证 — 除权日价格跳空阈值
+#     volume_change_limit: 0.50       # TODO: 需要回测验证 — 除权日成交量变化上限
+#   price:
+#     daily_limit: 0.10               # TODO: 需要回测验证 — A股主板涨跌幅上限
+#   survivorship:
+#     min_history_days: 240           # TODO: 需要回测验证 — A股交易日约240天/年
+#   derived:
+#     volatility_window: 20           # TODO: 需要回测验证 — 波动率滚动窗口
+#     volume_ma_window: 20            # TODO: 需要回测验证 — 成交量均线窗口
+#
+# 股票 cleaner 参数（涨跌停分池 10%/20%/5%、停牌判定改 tradestatus、ST 标记）
+# 待 T-2.1 派生涨跌停字段时再细化，见 ROADMAP_v1.md
