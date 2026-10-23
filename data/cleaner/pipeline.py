@@ -21,6 +21,11 @@ PIPELINE = [("align", align), ("suspension", suspension), ("price", price), ("ad
             # ("align", align),                   # 这里填充对应的模块名称，方便后续效用
             ]
 
+# 守卫：base.PIPELINE_NAMES 是给"不能依赖本模块的代码"用的名字常量（如 backtest/panel.py）
+#       两边漂了 ⇒ 缓存身份会误判 ⇒ 必须当场炸，不能静默
+assert base.PIPELINE_NAMES == tuple(n for n, _ in PIPELINE), (
+    f"PIPELINE_NAMES 与 PIPELINE 不一致：{base.PIPELINE_NAMES} vs {tuple(n for n, _ in PIPELINE)}")
+
 _START, _END = "2020-01-01", "2020-12-31"
 
 

@@ -85,3 +85,8 @@ def add_error(report, msg, exc=None):  # 这里用于处理存在的错误信息
 def finish_step_report(report, metrics):  # 此函数用于输出函数运行后的完整的报告
     report["metrics"] = metrics
     return report
+
+# ── 清洗环节清单（唯一权威是 pipeline.PIPELINE；这份常量给"不能依赖 pipeline 的模块"用）──
+# backtest/panel.py 只需要环节名来做缓存身份校验 —— 它不该为了一串名字去 import 整个管线
+# （那会让 data ↔ backtest 互相依赖）。两边一致性由 pipeline.py 的断言守着。
+PIPELINE_NAMES = ("align", "suspension", "price", "adjust", "derived")

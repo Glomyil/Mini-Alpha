@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 
 from data import loader
-from data.cleaner.pipeline import PIPELINE
+from data.cleaner.base import PIPELINE_NAMES   # 只要一串环节名，不依赖整个清洗管线
 SRC = Path("data/storage/cleaner_daily")          # 净数据（已落盘，5,471 个长表）
 CACHE = Path("backtest/cache")
 FIELDS = ["hfq_close", "hfq_open", "ret_1d_hfq",
@@ -107,7 +107,7 @@ def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, f
 
     if is_full and meta_p.exists():    # meta 是最后写的 ⇒ meta 在 = 四张表在（写序即不变量）
         meta = json.loads(meta_p.read_text(encoding="utf-8"))
-        if (meta["pipeline"] == [n for n, _ in PIPELINE]               # ③ 环节清单没变
+        if (meta["pipeline"] == list(PIPELINE_NAMES)               # ③ 环节清单没变
                 # ④ 数据还是那份
                 and meta["source_fingerprint"] == source_fingerprint(src)
                 and meta_p.stat().st_mtime > _SELF.stat().st_mtime):   # ⑤ 缓存比这份代码新
@@ -129,7 +129,7 @@ def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, f
         meta_p.write_text(json.dumps({
             "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "interval": [start, end], "n_codes": len(files),
-            "pipeline": [n for n, _ in PIPELINE],
+            "pipeline": list(PIPELINE_NAMES),
             "rows": panels["hfq_close"].shape[0], "cols": panels["hfq_close"].shape[1],
             "coverage_hfq_close": round(float(panels["hfq_close"].notna().to_numpy().mean()), 4),
             "tradable_median": int(panels["can_trade"].sum(axis=1).median()),
