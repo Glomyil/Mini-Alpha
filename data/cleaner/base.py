@@ -33,6 +33,9 @@ COLUMN_WHITELIST = {  # 在进行数据清洗时有时候会计算出新的指�
     "is_amt_vol_bad": "价格环节加量额判定异常：量额异常=1",
     "ret_1d_hfq": "今天相较前天复权后价格变动的百分比",
     "hfq_open":     "复权环节加：后复权开盘价（仅供比率用途 / T+1 开盘成交用）",
+    "flag_open_limit_up":   "涨跌停环节加：开盘即涨停=1（买不到）",
+    "flag_open_limit_down": "涨跌停环节加：开盘即跌停=1（卖不掉）",
+    "flag_new_listing":     "涨跌停环节加：处于新股无涨跌幅期=1",
 }
 
 
@@ -89,4 +92,4 @@ def finish_step_report(report, metrics):  # 此函数用于输出函数运行后
 # ── 清洗环节清单（唯一权威是 pipeline.PIPELINE；这份常量给"不能依赖 pipeline 的模块"用）──
 # backtest/panel.py 只需要环节名来做缓存身份校验 —— 它不该为了一串名字去 import 整个管线
 # （那会让 data ↔ backtest 互相依赖）。两边一致性由 pipeline.py 的断言守着。
-PIPELINE_NAMES = ("align", "suspension", "price", "adjust", "derived")
+PIPELINE_NAMES = ("align", "suspension", "price", "limits", "adjust", "derived")

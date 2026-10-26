@@ -15,9 +15,9 @@ from loguru import logger
 from config import constants as C
 from data import loader
 from data.cleaner import base
-from data.cleaner import align, suspension, price, adjust, derived
+from data.cleaner import align, suspension, price, limits, adjust, derived
 # 环节清单：顺序 = 执行顺序；元素 = (环节名, 模块)
-PIPELINE = [("align", align), ("suspension", suspension), ("price", price), ("adjust", adjust), ("derived", derived)
+PIPELINE = [("align", align), ("suspension", suspension), ("price", price), ("limits", limits), ("adjust", adjust), ("derived", derived)
             # ("align", align),                   # 这里填充对应的模块名称，方便后续效用
             ]
 
