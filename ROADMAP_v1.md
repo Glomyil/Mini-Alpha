@@ -328,7 +328,7 @@ factor_changed = out["back_adj_factor"].ne(out["back_adj_factor"].shift(1))
     ⇒ 证明 T-2.1 是【纯加列】改动，没有误伤任何计算 ✓✓
     ⇒ 面板 5 张表不变（3 个 flag 还没进 FIELDS —— 那是 T-2.2 的事）
 
-### T-2.2 掩码层：`can_buy` / `can_sell` / `reason`（1 天）
+### T-2.2 掩码层：`reason` 宽表（1 天）  ✅ **完成 2026-10-28**
 - **改动**：`backtest/panel.py`（新增宽表，`FIELDS` 加列；**不动** `can_trade` 的语义）
 - **要点**：
   - `reason`（int8）：0=ok、1=停牌、2=涨停买不到、3=跌停卖不掉、4=退市、5=无价；
@@ -338,6 +338,50 @@ factor_changed = out["back_adj_factor"].ne(out["back_adj_factor"].shift(1))
   - 缓存身份要跟着变（`FIELDS` 变了 → 缓存应自动失效，检查 `panel.py:85` 的 meta 校验）。
 - **验收**：`can_trade == (can_buy | can_sell)` 不成立是正常的，但要有一张对照表说明每天三种掩码的 True 比例；全库 `reason` 分布打印一次（预期停牌 ~1%、涨跌停各 <1%）。
 - **禁止**：改 `can_trade` 让它顺带承担交易语义（`rank_ic` 还在用它）。
+
+#### 2026-10-28 实际完成情况（和原计划的差异，重要）
+
+| 项 | 计划 | **实际** | 为什么改 |
+| :-- | :-- | :-- | :-- |
+| 落几张表 | 3 张（can_buy / can_sell / reason） | **1 张（只 reason）** | `can_buy = ~reason.isin((1,2,4,5))` 是**一行就能算**的 ⇒ 落两张违反"能算就不存"。改成 `derive_flags(reason)` 函数现算（留给 T-2.3 写） |
+| `reason` 编码 | 0–5 | **0–5，不变** | ✓ |
+| `can_trade` | 不动 | **不动** ✓ | rank_ic / weights / engine 健康断言 7 处都在用它 ✓ |
+
+**`reason` 六个编码的定义（面板 `backtest/cache/*_reason.parquet`，int8，2839×5471）**
+
+| 值 | 含义 | 判断依据（写入顺序 = 后者覆盖前者） | 实测占比 |
+| :-: | :-- | :-- | --: |
+| 0 | ok | 默认 | **72.65%** |
+| 1 | 停牌 | `is_suspended == 1` | 1.82% |
+| 2 | 涨停买不到 | `flag_open_limit_up == 1` | 0.29% |
+| 3 | 跌停卖不掉 | `flag_open_limit_down == 1` | 0.19% |
+| 4 | 不在市（未上市/已退市） | **装配后整格 NaN** ⇒ `fillna(4)` | **25.05%** |
+| 5 | 有行但无价 | `is_price_bad` 或 `hfq_close` 是 NaN（**最后写 = 优先级最高**） | 3 格 |
+
+⚠️ **"优先剔除、最后分类" 的含义**：被剔除者优先级最高 ⇒ **5 必须最后写**，否则被 1/2/3 覆盖 ✗
+（我第一版写反了，4 条测试立刻红 ⇒ 见 `qa/test_panel_reason.py`）
+
+**实测挖到的两个真问题**
+
+1. **pandas 的 int8 concat 用 0 填缺失，不是 NaN**（PITFALLS #27）
+   ⇒ `sh.601268`（cleaner 只有 92 行）在 `reason` 表里得到 2,839 个 **0** 而不是 NaN ⇒
+   `fillna(4)` 不触发 ⇒ 「不在市」的 388 万格（25%）全被标成 ok ✗✗
+   ⇒ 修法：`pd.Series(values, index=idx, name=stem, dtype="float32")` ✓
+2. **每只票的最后一行 `close` 是 NaN**（573 只里 3 只如此，占比极低）
+   ⇒ `reason=5` 精准抓到 ⇒ 证明 5 这个编码**不是死分支** ✓
+
+**验收**
+
+    .tmp/rebuild_panels.py 的 7 条检查全过
+      · 编码合法 + dtype=int8 ✓
+      · 形状/索引/列名与 can_trade 一致 (2839, 5471) ✓
+      · 『reason ∉ {4,5}』 ⇔ 『hfq_close 有值』 0 个不一致 ✓
+      · reason=0 ⇒ can_trade=True，0 违反 ✓
+      · reason=2/3 ⇒ can_trade 仍 True（有数据，只是买/卖不到）✓
+      · 抽查 5 只票的两数相等 ✓
+
+    qa/test_panel_reason.py  15 条（10 行 parametrize + 装配层 + 4 条不变量）
+    BASELINE 台账 6 行全部 +0.00  ⇒ engine 还没读 reason（那是 T-2.3）✓
 
 ### T-2.3 引擎：掩码 + 现金约束 + 卖不掉不补仓（1.5 天）
 - **改动**：`backtest/engine.py:59-99`

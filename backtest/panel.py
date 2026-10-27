@@ -10,14 +10,30 @@ from data.cleaner.base import PIPELINE_NAMES   # 只要一串环节名，不依�
 SRC = Path("data/storage/cleaner_daily")          # 净数据（已落盘，5,471 个长表）
 CACHE = Path("backtest/cache")
 FIELDS = ["hfq_close", "hfq_open", "ret_1d_hfq",
-          "can_trade", "amount"]  # 新增宽表名单
+          "can_trade", "amount", "reason"]  # 新增宽表名单
 _SELF = Path(__file__)                            # 判断"缓存是不是比这份代码新"
+
+
+def _reason_of(no_susp, no_bad, has_px, lim_up, lim_dn):
+    """单票层面的 reason：0=ok 1=停牌 2=涨停买不到 3=跌停卖不掉 5=有行无价。
+
+    写入顺序 = 停牌 → 涨停 → 跌停 → 无价，【后面的覆盖前面的】：
+        「优先剔除、最后分类」意味着【被剔除者的优先级最高】，
+        所以 5（无价/坏价）必须【最后写】，才能盖住 1/2/3 ✓
+    4（不在市）不在这里 —— 它只有装配后才知道（那格是 NaN）。
+    """
+    r = np.zeros(len(no_susp), dtype="int8")
+    r[~no_susp] = 1                 # 停牌
+    r[lim_up] = 2                   # 涨停买不到
+    r[lim_dn] = 3                   # 跌停卖不掉
+    r[~has_px | ~no_bad] = 5        # ★ 最后写 = 优先级最高（价格不可信，其它判据都无从谈起）
+    return r
 
 
 def build_panels(files):
     print(f"  开始重建面板：{len(files):,} 只 × {len(FIELDS)} 张表，约 30–90 秒（别中断）…")
-    # """读 cleaner_daily → 4 张宽表（不做清洗、不落盘）"""
-    c_l, o_l, r_l, t_l, a_l = [], [], [], [], []  # 想新建宽表就自己往等式左边加列表名，右边加列表:[]
+    # """读 cleaner_daily → 6 张宽表（不做清洗、不落盘）"""
+    c_l, o_l, r_l, t_l, a_l, rs_l = [], [], [], [], [], []  # 想新建宽表就自己往等式左边加列表名，右边加列表:[]
     for p in files:
         d = pd.read_parquet(p)
         idx = pd.DatetimeIndex(pd.to_datetime(d["date"]))
@@ -30,15 +46,26 @@ def build_panels(files):
         # ③ ret_1d_hfq：也是直接读 derived 的产物
         r_l.append(pd.Series(pd.to_numeric(d["ret_1d_hfq"], errors="coerce").to_numpy(),
                              index=idx, name=p.stem))
-        ok = ((pd.to_numeric(d["is_suspended"], errors="coerce").fillna(1).to_numpy() == 0)
-              & (pd.to_numeric(d["is_price_bad"], errors="coerce").fillna(1).to_numpy() == 0)
-              & pd.notna(pd.to_numeric(d["hfq_close"], errors="coerce").to_numpy()))
+        # 五个输入各转一次 numpy，can_trade 和 reason 复用（别重复 to_numeric ✓）
+        no_susp = pd.to_numeric(d["is_suspended"], errors="coerce").fillna(1).to_numpy() == 0
+        no_bad  = pd.to_numeric(d["is_price_bad"], errors="coerce").fillna(1).to_numpy() == 0
+        has_px  = pd.notna(pd.to_numeric(d["hfq_close"], errors="coerce").to_numpy())
+        ok = no_susp & no_bad & has_px
         t_l.append(pd.Series(ok, index=idx, name=p.stem))
-        # ④ amount：流动性因子用（单位只影响绝对值，不影响横截面【排名】✓）
+        # ④ reason：把"这天到底怎么了"编成一个 0–5 的数。顺序=先剔除、后分类 ✓
+        rs = _reason_of(no_susp, no_bad, has_px,
+                        lim_up=pd.to_numeric(d["flag_open_limit_up"],
+                                             errors="coerce").fillna(0).to_numpy() == 1,
+                        lim_dn=pd.to_numeric(d["flag_open_limit_down"],
+                                             errors="coerce").fillna(0).to_numpy() == 1)
+        # ⚠️ 必须 float32：整数 dtype 的 Series 在 concat 索引不齐时会用【0】填缺失（不是 NaN）✗
+        #    ⇒ 那样 fillna(4) 就无从下手，整列会变成 0（实测踩过：sh.601268 只有 92 行却得到 2839 个 0）
+        rs_l.append(pd.Series(rs, index=idx, name=p.stem, dtype="float32"))
+
+        # ⑤ amount：流动性因子用（单位只影响绝对值，不影响横截面【排名】✓）
 
         a_l.append(pd.Series(pd.to_numeric(d["amount"], errors="coerce").to_numpy(),
                              index=idx, name=p.stem))
-
         # 新增宽表格式统一使用（列表名）.append(pd.Series(pd.to_numeric(d["指标名"], errors="coerce").to_numpy(),
         #                             index=idx, name=p.stem))
 
@@ -49,7 +76,11 @@ def build_panels(files):
             "hfq_open":   pd.concat(o_l, axis=1).sort_index().astype("float32"),
             "ret_1d_hfq": pd.concat(r_l, axis=1).sort_index().astype("float32"),
             "amount":     pd.concat(a_l, axis=1).sort_index().astype("float32"),
-            "can_trade":  pd.concat(t_l, axis=1).sort_index().eq(True)}
+            "can_trade":  pd.concat(t_l, axis=1).sort_index().eq(True),
+            # reason：0=ok 1=停牌 2=涨停买不到 3=跌停卖不掉 4=不在市 5=有行无价
+            # 没有这一格 ⇒ NaN ⇒ 4（不在市）。必须 fillna 后再 cast，否则留 NaN ✓
+            "reason":     pd.concat(rs_l, axis=1).sort_index().fillna(4).astype("int8")}
+
     # 在返回的字典内新增与上述格式一致的宽表："指标名":     pd.concat(a_l, axis=1).sort_index().astype("float32"),
 
 
