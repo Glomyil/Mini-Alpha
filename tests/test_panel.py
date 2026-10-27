@@ -169,6 +169,11 @@ def write_fixture(dst, codes):
             "is_price_bad": [r[5] for r in rows],
             # ➕ amount：panel.FIELDS 里后来加了 amount（amihud 要用），夹具必须提供
             "amount": [float(1000 * (i + 1)) for i in range(len(rows))],
+            # ➕ 三个 flag（T-2.1 的产物）：panel.build_panels 要读它们算 reason。
+            #    这个夹具不测涨跌停 ⇒ 全 0 即可；涨跌停/新股期的夹具在 qa/test_panel_reason.py ✓
+            "flag_open_limit_up":   pd.Series([0] * len(rows), dtype="int8"),
+            "flag_open_limit_down": pd.Series([0] * len(rows), dtype="int8"),
+            "flag_new_listing":     pd.Series([0] * len(rows), dtype="int8"),
         })
         # amount==0 的行必须同时不可交易，否则 engine 的"0 价/0 额可交易"断言会拦
         # 这里 amount 恒为正，所以不会触发；留一行注释说明约束即可。

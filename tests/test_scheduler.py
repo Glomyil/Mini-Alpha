@@ -87,8 +87,8 @@ check(len(lp) == 1 and fors and lp[0].lineno < min(n.lineno for n in fors),
 
 print("── B. 功能检查（真数据，约 15 秒）──")
 panels = load_panels()
-check(sorted(panels) == ["amount", "can_trade", "hfq_close", "hfq_open", "ret_1d_hfq"],
-      f"面板 5 张表：{sorted(panels)}")
+check(sorted(panels) == ["amount", "can_trade", "hfq_close", "hfq_open", "reason", "ret_1d_hfq"],
+      f"面板 6 张表（T-2.2 加了 reason）：{sorted(panels)}")
 check(panels["hfq_close"].shape == (2839, 5471), f"面板形状 {panels['hfq_close'].shape}")
 
 rdates = [d for d in rebalance_dates(panels["hfq_close"].index) if d.year >= SINCE]
