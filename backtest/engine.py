@@ -2,7 +2,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from loguru import logger
-
+from backtest.panel import derive_flags
 
 _PANEL_SNAP = {}
 
@@ -14,9 +14,10 @@ def _panel_arrays(panels, cols):
     turnover ~5 instead of ~100 (PITFALLS #24). Caching also removes 17 of 18 copies.
     """
     key = (id(panels["hfq_close"]), id(panels["hfq_open"]),
-           id(panels["can_trade"]), tuple(cols))
+           id(panels["can_trade"]), id(panels["reason"]), tuple(cols))
     if _PANEL_SNAP.get("key") == key:
-        return _PANEL_SNAP["op"], _PANEL_SNAP["vl"], _PANEL_SNAP["ct"]
+        return (_PANEL_SNAP["op"], _PANEL_SNAP["vl"], _PANEL_SNAP["ct"],
+                _PANEL_SNAP["cb"], _PANEL_SNAP["cs"])
 
     # 按【标签】对齐（等价老的 panels[...][cols]）：先拿到列的整数位置，再用 numpy 选列
     # ???????????? panels[...][cols]??W ????????? -> ?? KeyError
@@ -28,6 +29,11 @@ def _panel_arrays(panels, cols):
     op = np.ascontiguousarray(panels["hfq_open"].to_numpy()[:, _ci])
     _cl = np.ascontiguousarray(panels["hfq_close"].to_numpy()[:, _ci])
     _ct = np.ascontiguousarray(panels["can_trade"].to_numpy()[:, _ci])
+    _rs = np.ascontiguousarray(panels["reason"].to_numpy()[:, _ci])
+    _fl = derive_flags(_rs)
+    cb = np.ascontiguousarray(_fl["can_buy"])
+    cs = np.ascontiguousarray(_fl["can_sell"])
+
     _idx = np.where(~np.isnan(_cl), np.arange(_cl.shape[0])[:, None], 0)
     np.maximum.accumulate(_idx, axis=0, out=_idx)
     # numpy ffill (== pandas .ffill())
@@ -43,8 +49,9 @@ def _panel_arrays(panels, cols):
         assert float(np.isfinite(vl).mean(
         )) > 0.3, "hfq_close ffill mostly non-finite -- snapshot degraded"
 
-    _PANEL_SNAP.update(key=key, op=op, vl=vl, ct=ct)
-    return op, vl, ct
+
+    _PANEL_SNAP.update(key=key, op=op, vl=vl, ct=ct, cb=cb, cs=cs)
+    return op, vl, ct, cb, cs
 
 
 def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, slippage=0.0005, init_cash=1.0):
@@ -55,7 +62,7 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
     # dtype 跟随面板（真实面板 float32 / 合成面板 float64）
     # No pandas [cols]/ffill here: that chain is the one observed to occasionally return
     # shape-correct but value-wrong tables (PITFALLS #23/#24 -> nav_pre too small -> turnover ~5)
-    op, vl, ct = _panel_arrays(panels, cols)
+    op, vl, ct, cb, cs = _panel_arrays(panels, cols)
     # open valuation price: today's open if present, else previous close (pv = vl shifted by 1)
     pv = np.empty_like(vl)
     pv[0] = np.nan
@@ -79,6 +86,11 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
         _rows = days.get_indexer(pd.DatetimeIndex(exec_days))
         _r = float(ct[_rows].mean())
         assert 0.4 < _r < 0.95, f"执行日 can_trade True 占比 {_r:.3f} 越界（健康值 ≈0.73）—— 数据可疑"
+        # T-2.3：两个方向的掩码也各查一条（涨停只封买 ⇒ can_buy 略小于 can_sell ✓）
+        _buy_r = float(cb[_rows].mean())
+        _sell_r = float(cs[_rows].mean())
+        assert 0.4 < _buy_r < 0.95, f"执行日 can_buy 占比 {_buy_r:.3f} 越界（健康 ≈0.728）—— reason 表退化？"
+        assert 0.4 < _sell_r < 0.95, f"执行日 can_sell 占比 {_sell_r:.3f} 越界（健康 ≈0.729）—— reason 表退化？"
         _op = float((op[_rows] > 0.0).mean())
         _vl = float((vl[_rows] > 0.0).mean())
         assert _op > 0.3, f"执行日 hfq_open 正价占比 {_op:.3f} 过低（健康值 ≈0.75）—— 价格表退化，拒绝回测"
@@ -121,28 +133,58 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
         if i in exec_pos:
             k = ex_row[dt]
             w = Wn[rd_row[exec_pos[i]]]
-            tradable = ct[i] & (op[i] > 0.0)
+
+            # ① 两个方向各自的成交许可：涨停只封买、跌停只封卖（T-2.3 的核心）
+            #    b_ok/s_ok 各自独立，所以同一天可以"能卖不能买"或"能买不能卖" ✓
+            b_ok = cb[i] & (op[i] > 0.0)
+            s_ok = cs[i] & (op[i] > 0.0)
+            tradable = ct[i] & (op[i] > 0.0)      # 只用来数 n_empty（"今天一只都动不了"）
             if not tradable.any():
                 n_empty += 1
-            exec_px = np.where(tradable, op[i], np.nan)
+
+            # ② 估值：opv = 有开盘价就用开盘价，缺了退前一日收盘（停牌日靠这个）
             val_px = np.nan_to_num(opv[i])
             nav_pre = cash + float((shares * val_px).sum())
             nav_pre_a[k] = nav_pre
-            tgt = np.where(np.isnan(exec_px), shares,
-                           nav_pre * w / np.nan_to_num(exec_px, nan=1.0))
-            delta = tgt - shares
-            px0 = np.nan_to_num(exec_px)
-            buy_px = px0 * (1 + slippage)
-            sold_px = px0 * (1 - slippage)
-            buy = float((np.clip(delta, 0, None) * buy_px).sum())
-            sell = float((-np.clip(delta, None, 0) * sold_px).sum())
-            fee = buy * fee_buy + sell * fee_sell
-            cash += sell - buy - fee
-            shares = shares + delta
-            turnover_a[k] = 0.5 * (buy + sell) / \
+
+            # ③ 目标股数：用【今日开盘价】算（px0 兜 1.0 只是防 0 除，不会真的按 1 元成交）
+            px0 = np.nan_to_num(op[i])
+            want = nav_pre * w / np.where(px0 > 0.0, px0, 1.0)
+            delta = want - shares
+
+            # ④ 分方向裁掉：卖不掉的保持原样（d_sell=0），买不到的放弃（d_buy=0）
+            #    ★ delta 在这里被劈成两半 —— 这是整个改动唯一的新语义
+            d_sell = np.where((delta < 0.0) & s_ok, delta, 0.0)     # 负数
+            d_buy = np.where((delta > 0.0) & b_ok, delta, 0.0)      # 正数
+
+            # ⑤ 先卖：卖出所得【当天】就能拿去买（T+1 只限制提现，不限制当天买入）
+            #    注意 cash_avail 要扣【卖出费】—— 那是净到手，不是毛收入 ✓
+            sell_val = float((-d_sell * px0 * (1.0 - slippage)).sum())
+            cash_avail = cash + sell_val - sell_val * fee_sell
+
+            # ⑥ 再买：钱不够就【全组合等比缩量】，不在别处补仓
+            #    ★ need 必须把【买入手续费】也算进去（= 滑点 × (1+fee_buy)），
+            #      否则 scale 会把现金精确花到 0，随后 fee 一扣就透支
+            #      （实测：漏了这一步 ⇒ cash = -0.000641，被下面那条断言当场抓住 ✓）
+            buy_coef = (1.0 + slippage) * (1.0 + fee_buy)
+            need = float((d_buy * px0 * buy_coef).sum())
+            scale = min(1.0, cash_avail / (need + 1e-12)) if need > 0.0 else 1.0
+            d_buy *= scale
+
+            # ⑦ 结算：现金与持仓同时推进，然后当场验"没透支"
+            buy_val = float((d_buy * px0 * (1.0 + slippage)).sum())
+            fee = buy_val * fee_buy + sell_val * fee_sell
+            cash += sell_val - buy_val - fee
+            shares = shares + d_sell + d_buy
+            assert cash >= -1e-9, (
+                f"现金透支 {cash:.6f}（scale={scale:.4f} need={need:.4f} "
+                f"avail={cash_avail:.4f} buy_coef={buy_coef:.6f}）"
+                f"—— 缩量或掩码算错了")
+
+            turnover_a[k] = 0.5 * (buy_val + sell_val) / \
                 nav_pre if nav_pre > 0 else 0.0
             fees_a[k] = fee
-            trades_a[k] = delta.astype("float32")
+            trades_a[k] = (d_sell + d_buy).astype("float32")
             shares_a[k] = shares.astype("float32")
         nav_a[i] = cash + float((shares * np.nan_to_num(vl[i])).sum())
         nav_open_a[i] = cash + float((shares * np.nan_to_num(opv[i])).sum())

@@ -47,9 +47,12 @@ def build_panels(files):
         r_l.append(pd.Series(pd.to_numeric(d["ret_1d_hfq"], errors="coerce").to_numpy(),
                              index=idx, name=p.stem))
         # 五个输入各转一次 numpy，can_trade 和 reason 复用（别重复 to_numeric ✓）
-        no_susp = pd.to_numeric(d["is_suspended"], errors="coerce").fillna(1).to_numpy() == 0
-        no_bad  = pd.to_numeric(d["is_price_bad"], errors="coerce").fillna(1).to_numpy() == 0
-        has_px  = pd.notna(pd.to_numeric(d["hfq_close"], errors="coerce").to_numpy())
+        no_susp = pd.to_numeric(
+            d["is_suspended"], errors="coerce").fillna(1).to_numpy() == 0
+        no_bad = pd.to_numeric(
+            d["is_price_bad"], errors="coerce").fillna(1).to_numpy() == 0
+        has_px = pd.notna(pd.to_numeric(
+            d["hfq_close"], errors="coerce").to_numpy())
         ok = no_susp & no_bad & has_px
         t_l.append(pd.Series(ok, index=idx, name=p.stem))
         # ④ reason：把"这天到底怎么了"编成一个 0–5 的数。顺序=先剔除、后分类 ✓
@@ -170,6 +173,22 @@ def load_panels(start="2015-01-01", end="2026-12-31", *, src=None, cache=None, f
         f"panel build shape:{panels['hfq_close'].shape} codes:{len(files)}")
     _check_prices(panels)
     return panels
+
+
+"""reason（ndarray, int8）→ can_buy / can_sell（ndarray, bool）。
+
+    编码知识只住在这里：以后 reason 加 6，只改这两行就够，engine 一行不动。
+    只吃 ndarray —— 不生成 DataFrame、不落盘、不进缓存。
+    """
+
+
+def derive_flags(reason):
+
+    arr = np.asarray(reason)
+    return {
+        "can_buy":  ~np.isin(arr, (1, 2, 4, 5)),   # 停牌/涨停/不在市/无价 ⇒ 买不到
+        "can_sell": ~np.isin(arr, (1, 3, 4, 5)),   # 停牌/跌停/不在市/无价 ⇒ 卖不掉
+    }
 
 
 if __name__ == "__main__":
