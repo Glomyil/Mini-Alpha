@@ -63,14 +63,15 @@ _tmp_*/
 *.log
 reports/
 
-# ¸öÈË SOP£¬±¾µØÎ¬»¤£¬²»½ø²Ö¿â
-¹¤×÷Á÷.txt
+#      SOP      Î¬         Ö¿ 
+      .txt
 
-¹¤×÷Á÷.txt
-¹¤×÷Á÷-Ï¸Ôò.txt
-
-docs/dev/T-*/
-docs/dev/_skills/
+      .txt
+      -Ï¸  .txt
 
 docs/dev/T-*/
 docs/dev/_skills/
+
+docs/dev/T-*/
+docs/dev/_skills/
+ç®€å†æ ·æ¿/
