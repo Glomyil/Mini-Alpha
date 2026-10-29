@@ -134,10 +134,11 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
     parts += ["## 3. 多空（三种定义）", "",
               "| 定义 | 累计 |", "| :-- | --: |"] + \
         [f"| {k} | {v:.2%} |" for k, v in ls.items()] + [""]
-    mono = layer_tab["年化"].corr(
-        pd.Series(layer_tab.index, index=layer_tab.index), method="spearman")
+    # 零依赖版 Spearman（pandas 那个要 scipy，requirements 里没有 ✗）
+    mono = MT.spearman_rank(layer_tab["年化"].tolist(), list(range(len(layer_tab))))
+    mono_txt = "nan" if mono is None else f"{mono:.3f}"
     parts += ["## 4. 结论（机械生成，不掺主观）", "",
-              f"- 层号 vs 年化的 Spearman = **{mono:.3f}**（越接近 1 越单调；< 0 说明高分位反而差）",
+              f"- 层号 vs 年化的 Spearman = **{mono_txt}**（越接近 1 越单调；< 0 说明高分位反而差）",
               f"- 最高层：层 {layer_tab['年化'].idxmax()}（年化 {layer_tab['年化'].max():.2%}）",
               f"- 最低层：层 {layer_tab['年化'].idxmin()}（年化 {layer_tab['年化'].min():.2%}）", ""]
     if note:

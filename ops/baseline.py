@@ -1,7 +1,5 @@
 import argparse
 import statistics
-
-import pandas as pd
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -37,15 +35,38 @@ def read_report(path):
     return {"ann": ann, "vol": vol, "to": to}
 
 
+def _rank_avg(v):
+    """把值换成排名（1..n），并列取平均 —— 和 pandas 的 rank(method="average") 同义。"""
+    order = sorted(range(len(v)), key=lambda i: v[i])
+    r = [0.0] * len(v)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            r[order[k]] = avg
+        i = j + 1
+    return r
+
+
 def mono(ann):
-    """分层单调性：层序 0..4 与年化排名的相关系数；层不齐返回 None。"""
+    """分层单调性：层序 0..4 与年化的 Spearman（秩相关）；层不齐或五层全一样返回 None。
+
+    为什么不用 pandas 的 corr(method="spearman")：那个内部要 scipy，
+    而 CI 环境没装 ⇒ qa/test_baseline.py 五条直接 ModuleNotFoundError ✗
+
+    自己算没有依赖：Spearman 就是「先把值换成排名，再算 Pearson」✓
+    2026-10-28 之前的台账用的是 Pearson，和之后的值不可比。
+    """
     if len(ann) != 5:
         return None
-    # 2026-10-28：Pearson → Spearman。原先的 statistics.correlation 是 Pearson，
-    # 会被层 0 的大数值拉高，和 report.py 的 Spearman 对不上（实测 0.64 vs 0.300）。
-    # 注意：2026-10-28 之前的台账单调性是 Pearson，和之后不可比 ✓
-    return float(pd.Series([ann[str(i)] for i in range(5)]).corr(
-        pd.Series(range(5)), method="spearman"))
+    y = [ann[str(i)] for i in range(5)]
+    try:
+        return float(statistics.correlation(_rank_avg(y), [1.0, 2.0, 3.0, 4.0, 5.0]))
+    except statistics.StatisticsError:
+        return None      # 五层年化全一样 ⇒ 相关系数无定义（pandas 返回 nan，这里返回 None）
 
 
 def num(a, b, unit="", fmt="{:.2f}"):

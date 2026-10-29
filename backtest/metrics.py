@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import statistics
+
 import numpy as np
 import pandas as pd
 
@@ -51,6 +53,35 @@ def turnover_ann(turnover: pd.Series, nav: pd.Series) -> float:
 
 def fee_total(fees: pd.Series) -> float:
     return float(fees.sum())
+
+
+def _rank_avg(v):
+    """把值换成排名（1..n），并列取平均 —— 和 pandas 的 rank(method="average") 同义。"""
+    order = sorted(range(len(v)), key=lambda i: v[i])
+    r = [0.0] * len(v)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            r[order[k]] = avg
+        i = j + 1
+    return r
+
+
+def spearman_rank(a, b):
+    """两个序列的 Spearman（秩相关），零依赖。任一序列是常数时返回 None。
+
+    ⚠️ 不要用 pandas 的 .corr(method="spearman")：那个内部要 scipy，
+    而 requirements.txt 里没有 scipy ⇒ CI 上会 ModuleNotFoundError ✗
+    Spearman 的定义就是「先换排名，再算 Pearson」✓
+    """
+    try:
+        return float(statistics.correlation(_rank_avg(list(a)), _rank_avg(list(b))))
+    except statistics.StatisticsError:
+        return None      # 有常数序列 ⇒ 相关系数无定义（pandas 那边返回 nan）
 
 
 def rank1d(x, ties="first"):
