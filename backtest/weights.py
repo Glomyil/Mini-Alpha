@@ -18,7 +18,7 @@ def build_target_weights(factor, rdates, can_trade, n_layers=5):
         assert 0.4 < _r < 0.95, f"can_trade True ratio {_r:.3f} out of range (healthy ~0.73) -- data suspect"
 
     # --- pure numpy core: no pandas row-level .loc inside the loop (PITFALLS #23) ---
-    # One reindex each, then C-contiguous snapshots; everything after this is numpy.
+    # 每张表各 reindex 一次，然后拍成 C 连续的快照 —— 这之后全是纯 numpy，不再回到 pandas
     F = np.ascontiguousarray(
         factor.reindex(index=rdates, columns=cols).to_numpy(dtype="float64", copy=True))
     C = np.ascontiguousarray(

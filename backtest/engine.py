@@ -8,24 +8,25 @@ _PANEL_SNAP = {}
 
 
 def _panel_arrays(panels, cols):
-    """Convert + validate the three big panel tables ONCE per process (was once per factor).
+    """把几张大面板表转成 numpy 并且【当场验一遍】—— 整个进程只做一次（以前是每个因子都重做）。
 
-    Verification matters: an incomplete snapshot made nav_pre too small, which showed up as
-    turnover ~5 instead of ~100 (PITFALLS #24). Caching also removes 17 of 18 copies.
+    为什么要验：吃过一次亏 —— 拿到一份不完整的快照，nav_pre 算小了，
+    最后换手率算出来只有 5（正常的应该是 100 上下），而且一点都不报错（PITFALLS #24）。
+    顺带缓存还省掉了 18 次里的 17 次复制。
     """
     key = (id(panels["hfq_close"]), id(panels["hfq_open"]),
            id(panels["can_trade"]), id(panels["reason"]), tuple(cols))
     if _PANEL_SNAP.get("key") == key:
         return (_PANEL_SNAP["op"], _PANEL_SNAP["vl"], _PANEL_SNAP["ct"],
-                _PANEL_SNAP["cb"], _PANEL_SNAP["cs"])
+                _PANEL_SNAP["cb"], _PANEL_SNAP["cs"], _PANEL_SNAP["_rs"])
 
     # 按【标签】对齐（等价老的 panels[...][cols]）：先拿到列的整数位置，再用 numpy 选列
-    # ???????????? panels[...][cols]??W ????????? -> ?? KeyError
+    # 按标签取列：W 里如果有面板不存在的股票代码，这里会直接抛 KeyError（不许静默缺列）
     _ci = panels["hfq_close"].columns.get_indexer(cols)
     _missing = [c for c, q in zip(cols, _ci) if q < 0]
     if _missing:
-        raise KeyError(f"W ?????????: {_missing[:5]}"
-                       f"{' ? ' + str(len(_missing)) + ' ?' if len(_missing) > 5 else ''}")
+        raise KeyError(f"W 里有面板不存在的股票代码: {_missing[:5]}"
+                       f"{' 等 ' + str(len(_missing)) + ' 个' if len(_missing) > 5 else ''}")
     op = np.ascontiguousarray(panels["hfq_open"].to_numpy()[:, _ci])
     _cl = np.ascontiguousarray(panels["hfq_close"].to_numpy()[:, _ci])
     _ct = np.ascontiguousarray(panels["can_trade"].to_numpy()[:, _ci])
@@ -36,7 +37,7 @@ def _panel_arrays(panels, cols):
 
     _idx = np.where(~np.isnan(_cl), np.arange(_cl.shape[0])[:, None], 0)
     np.maximum.accumulate(_idx, axis=0, out=_idx)
-    # numpy ffill (== pandas .ffill())
+    # 用 numpy 做 ffill（等价 pandas 的 .ffill()，但循环里不允许出现 pandas）
     vl = np.take_along_axis(_cl, _idx, axis=0)
     ct = np.ascontiguousarray(_ct)
 
@@ -49,9 +50,8 @@ def _panel_arrays(panels, cols):
         assert float(np.isfinite(vl).mean(
         )) > 0.3, "hfq_close ffill mostly non-finite -- snapshot degraded"
 
-
-    _PANEL_SNAP.update(key=key, op=op, vl=vl, ct=ct, cb=cb, cs=cs)
-    return op, vl, ct, cb, cs
+    _PANEL_SNAP.update(key=key, op=op, vl=vl, ct=ct, cb=cb, cs=cs, _rs=_rs)
+    return op, vl, ct, cb, cs, _rs
 
 
 def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, slippage=0.0005, init_cash=1.0):
@@ -60,10 +60,11 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
     # 入口全部走 numpy（2026-10-13 改）：不再用 pandas 的 `[cols]` / `.eq(True)` / `.copy()` 链
     # —— 那条链被实测到会**偶发**产出"形状正确、dtype 正确、但数据全 False"的表（非确定性缺陷）
     # dtype 跟随面板（真实面板 float32 / 合成面板 float64）
-    # No pandas [cols]/ffill here: that chain is the one observed to occasionally return
-    # shape-correct but value-wrong tables (PITFALLS #23/#24 -> nav_pre too small -> turnover ~5)
+    # 入口一律走 numpy，不用 pandas 的 [cols] / .ffill() 链 ——
+    # 那条链被实测到过「形状对、dtype 对、但数值全错」的偶发情况（PITFALLS #23/#24），
+    # 表现是 nav_pre 偏小，最后换手率算出来只有 5 左右（正常应该是 100 上下）
     op, vl, ct, cb, cs = _panel_arrays(panels, cols)
-    # open valuation price: today's open if present, else previous close (pv = vl shifted by 1)
+    # 开盘估值价：今天有开盘价就用开盘价，没有（停牌/缺数据）就退到前一交易日的收盘价
     pv = np.empty_like(vl)
     pv[0] = np.nan
     pv[1:] = vl[:-1]
@@ -112,18 +113,23 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
     shares_a = np.zeros((n_ex, n_cols), dtype="float32")
     n_empty = 0
 
-    # one-shot snapshots so the loop never touches pandas
-    # Prefer the ndarray handed over by build_target_weights: zero copy, so there is no
-    # window in which an incomplete copy could zero/repeat rows (symptom: turnover < 20).
+    # 一次性把权重拍成快照 —— 之后整个循环里一个 pandas 对象都不许碰
+    # 优先用 build_target_weights 直接递过来的 ndarray：零拷贝，
+    # 所以不存在「复制到一半被读到」的窗口（那个症状是换手率 < 20）
+    trades_a = np.zeros((n_ex, n_cols),    dtype="float32")
+    shares_a = np.zeros((n_ex, n_cols),    dtype="float32")
+    blocked_buy_a = np.zeros((n_ex, n_cols),  dtype="float32")
+    blocked_sell_a = np.zeros((n_ex, n_cols), dtype="float32")
+
     Wn = getattr(W_layer, "attrs", {}).get("np")
     if Wn is not None:
-        # handed over by build_target_weights => real weights; verify every row sums to ~1
+        # 来自 build_target_weights 的真权重 ⇒ 每一行的和必须接近 1（满仓或空层）
         Wn = np.ascontiguousarray(Wn)
         _rs = np.abs(Wn).sum(axis=1)
         assert float(_rs.min()) > 0.9, (
             f"W has a bad row (min row sum {float(_rs.min()):.4f}) -- refusing to run the engine")
     else:
-        # manually built weights (tests / synthetic fixtures): empty layers are legal
+        # 手工造的权重（测试 / 合成夹具）：允许有空层，所以不做行和校验
         Wn = np.nan_to_num(W_layer.to_numpy(
             dtype="float64", copy=True), nan=0.0)
     rd_row = {d: i for i, d in enumerate(W_layer.index)}
@@ -157,6 +163,9 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
             d_sell = np.where((delta < 0.0) & s_ok, delta, 0.0)     # 负数
             d_buy = np.where((delta > 0.0) & b_ok, delta, 0.0)      # 正数
 
+            blocked_buy_a[k] = np.where((delta > 0.0) & ~b_ok, delta, 0.0)
+            blocked_sell_a[k] = np.where((delta < 0.0) & ~s_ok, -delta, 0.0)
+
             # ⑤ 先卖：卖出所得【当天】就能拿去买（T+1 只限制提现，不限制当天买入）
             #    注意 cash_avail 要扣【卖出费】—— 那是净到手，不是毛收入 ✓
             sell_val = float((-d_sell * px0 * (1.0 - slippage)).sum())
@@ -168,7 +177,8 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
             #      （实测：漏了这一步 ⇒ cash = -0.000641，被下面那条断言当场抓住 ✓）
             buy_coef = (1.0 + slippage) * (1.0 + fee_buy)
             need = float((d_buy * px0 * buy_coef).sum())
-            scale = min(1.0, cash_avail / (need + 1e-12)) if need > 0.0 else 1.0
+            scale = min(1.0, cash_avail / (need + 1e-12)
+                        ) if need > 0.0 else 1.0
             d_buy *= scale
 
             # ⑦ 结算：现金与持仓同时推进，然后当场验"没透支"
@@ -198,6 +208,8 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
     fees = pd.Series(fees_a, index=exec_days)
     trades = pd.DataFrame(trades_a, index=exec_days, columns=cols)
     shares_hist = pd.DataFrame(shares_a, index=exec_days, columns=cols)
+    block_buy = pd.DataFrame(blocked_buy_a, index=exec_days, column=cols)
+    block_sell = pd.DataFrame(blocked_sell_a, index=exec_days, column=cols)
 
     if n_empty > max(2, len(exec_days) // 10):
         raise AssertionError(
@@ -206,7 +218,8 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
         logger.warning(f"eng n_empty:{n_empty}/{len(exec_days)} "
                        f"turnover:{float(turnover.sum()):.4f} fees:{float(fees.sum()):.4f}")
     return {"nav": nav, "nav_open": nav_open, "nav_pre": nav_pre_s, "cash": cash_s,
-            "turnover": turnover, "fees": fees, "trades": trades, "shares": shares_hist}
+            "turnover": turnover, "fees": fees, "trades": trades, "shares": shares_hist,
+            "block_buy": block_buy, "block_sell": block_sell}
 
 
 def run_all_layers(W, panels, rdates, **kw):

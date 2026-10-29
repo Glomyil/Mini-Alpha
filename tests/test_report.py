@@ -124,6 +124,29 @@ check(any(("YaHei" in f) or ("SimHei" in f) for f in fonts), f"font.sans-serif =
 check(RP.plt.rcParams["axes.unicode_minus"] is False, "axes.unicode_minus = False（负号不丢）")
 
 print()
+print('\n── ⑨ 有 res 时：首屏出现「## 0. 成交失败」（T-2.4）──')
+# res 是 list[dict]（每层一个账本）；用层 4 => [_one] * 5 ✓
+_ex = pd.DatetimeIndex([rdates[1], rdates[2]])
+_flat = pd.DataFrame([[10.0], [11.0]], index=_ex, columns=[0])
+_one = {
+    "turnover":     pd.Series([0.5, 0.5], index=_ex),
+    "fees":         pd.Series([0.001, 0.001], index=_ex),
+    "blocked_buy":  pd.DataFrame([[0.01], [0.0]], index=_ex, columns=[0]),
+    "blocked_sell": pd.DataFrame([[0.0], [0.0]], index=_ex, columns=[0]),
+    "nav_pre":      pd.Series([1.0, 1.0], index=_ex),
+}
+_panels = {"hfq_close": _flat, "hfq_open": _flat,
+           "can_trade": pd.DataFrame([[True], [True]], index=_ex, columns=[0]),
+           "reason": pd.DataFrame([[2], [0]], index=_ex, columns=[0], dtype="int8")}
+# factor_val 的列必须和 panels["hfq_close"] 的列一致（rank_ic 有断言）；
+# 而且不能用全 0 —— 常数横截面会让 Spearman 算不出来、直接抛断言 ✗
+_fv = pd.DataFrame(np.random.RandomState(0).randn(len(idx), 1),
+                   index=idx, columns=[0])
+out3 = RP.build_report("rev_20d", nav_df, _panels, rdates,
+                       [_one] * 5, outdir=TMP, factor_val=_fv)
+check("## 0. 成交失败" in out3["md"].read_text(encoding="utf-8"),
+      "有 res 时报告首屏出现「## 0. 成交失败」")
+
 print("=" * 46)
 print(f"  ✅ 断言条数守卫：{n_assert} 条")
 print(f"结果: 通过 {n_pass} / {n_assert}")

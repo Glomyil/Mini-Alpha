@@ -1,5 +1,7 @@
 import argparse
 import statistics
+
+import pandas as pd
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -39,7 +41,11 @@ def mono(ann):
     """分层单调性：层序 0..4 与年化排名的相关系数；层不齐返回 None。"""
     if len(ann) != 5:
         return None
-    return statistics.correlation([ann[str(i)] for i in range(5)], list(range(5)))
+    # 2026-10-28：Pearson → Spearman。原先的 statistics.correlation 是 Pearson，
+    # 会被层 0 的大数值拉高，和 report.py 的 Spearman 对不上（实测 0.64 vs 0.300）。
+    # 注意：2026-10-28 之前的台账单调性是 Pearson，和之后不可比 ✓
+    return float(pd.Series([ann[str(i)] for i in range(5)]).corr(
+        pd.Series(range(5)), method="spearman"))
 
 
 def num(a, b, unit="", fmt="{:.2f}"):

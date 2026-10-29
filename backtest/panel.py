@@ -69,8 +69,11 @@ def build_panels(files):
 
         a_l.append(pd.Series(pd.to_numeric(d["amount"], errors="coerce").to_numpy(),
                              index=idx, name=p.stem))
-        # 新增宽表格式统一使用（列表名）.append(pd.Series(pd.to_numeric(d["指标名"], errors="coerce").to_numpy(),
-        #                             index=idx, name=p.stem))
+        # ── 以后要加宽表，就照这三步来 ──
+        #   ① 上面那行多开一个列表：c_l, o_l, r_l, t_l, a_l, rs_l, xx_l = [], [], ...
+        #   ② 这里 append：xx_l.append(pd.Series(..., index=idx, name=p.stem))
+        #   ③ return 字典里加一项，dtype 想清楚（⚠️ 要 fillna 的必须给 float，int 会拿 0 填缺失）
+        #   ④ 最后别忘了把名字加进 FIELDS（否则缓存身份不变，不会重建）
 
     # ★ 对齐后"未上市 / 已退市"的日期才第一次出现（长表里根本没有那一行）→ 那些格子是 NaN；
     #   bool 列一进 concat 会升成 object，此时 .astype(bool) 会把 NaN 变成 True（凭空可交易）
@@ -97,11 +100,12 @@ def source_fingerprint(src=SRC):
 
 
 def _materialize(panels: dict) -> dict:
-    """Force a private, contiguous copy of every table AND verify the copy is complete.
+    """把每张表【逼】着拷一份私有的、内存连续的副本，然后【当场验这一份是完整的】。
 
-    Why the check: an incomplete bulk copy would corrupt the panel at the source, and every
-    later computation would then be a faithful execution on bad input (PITFALLS #23/#24).
-    We compare the NaN pattern (cheap, catches unwritten regions) plus sampled values.
+    为什么要验：批量拷贝如果没拷完，坏的是【源头】——
+    后面所有计算都会变成"忠实地在一个坏输入上执行"，一路错到底还不报错（PITFALLS #23/#24）。
+
+    验法：先比 NaN 的分布（便宜，专抓"没写到的区域"），再抽一些值比一比。
     """
     out = {}
     for k, v in panels.items():

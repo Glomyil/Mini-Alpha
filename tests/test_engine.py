@@ -310,6 +310,17 @@ check(bool(np.allclose((res['nav_pre'] - res['fees']).to_numpy(),
                        nav_open_s.loc[res['nav_pre'].index].to_numpy(), atol=1e-9)),
       f"恒等式：nav_open(执行日) = nav_pre − 费用（d1 实测 {float(nav_open_s.loc[DAYS[1]]):.10f}）")
 
+print('\n── ㉕ 被挡的调仓（T-2.4）：想买买不到 / 想卖卖不掉，都要留下来 ──')
+bb = res["blocked_buy"]
+bs = res["blocked_sell"]
+check(bb.shape == (len(res["nav_pre"]), len(CODES)),
+      f"blocked_buy 形状 = (执行日, 股票)：{bb.shape}")
+# 基础 fixture：C 在 DAYS[1] can_trade=False（reason=1 停牌）⇒ 想买买不到
+check(float(bb.loc[DAYS[1], "C"]) > 0.0,
+      f"d1 想买 C 但买不到 ⇒ 记下 {float(bb.loc[DAYS[1], 'C']):.6f} 股")
+check(float(bb.loc[DAYS[1], "A"]) == 0.0,
+      "A 那天没被挡 ⇒ 一格都不许有值（有值就说明掩码用错了）")
+
 check(passed + failed >= 15, f"断言条数守卫：{passed + failed} 条")
 print(f"结果: 通过 {passed} / {passed + failed}")
 if failed:

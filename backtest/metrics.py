@@ -54,10 +54,11 @@ def fee_total(fees: pd.Series) -> float:
 
 
 def rank1d(x, ties="first"):
-    """Explicit ranks 1..n.
+    """自己算排名（1..n），不调 pandas。
 
-    ties="first"   -> pandas rank(method="first")   (used for layer assignment)
-    ties="average" -> pandas rank(method="average") (textbook Spearman, used for IC)
+    并列怎么处理由 ties 决定：
+      ties="first"   ⇒ 等价 pandas 的 rank(method="first")   —— 分层用这个（必须能分出先后）
+      ties="average" ⇒ 等价 pandas 的 rank(method="average") —— 教科书 Spearman 用这个（算 IC）
     """
     x = np.asarray(x, dtype="float64")
     order = np.argsort(x, kind="stable")
@@ -67,11 +68,15 @@ def rank1d(x, ties="first"):
         xs = x[order]
         new = np.empty(xs.size, dtype=bool)
         new[0] = True
-        new[1:] = xs[1:] != xs[:-1]                 # run boundaries (values already sorted)
-        gid = np.cumsum(new) - 1                    # group id per sorted position
+        # run boundaries (values already sorted)
+        new[1:] = xs[1:] != xs[:-1]                 # 找连续段的边界（xs 已经排好序）
+        # group id per sorted position
+        gid = np.cumsum(new) - 1
         cnt = np.bincount(gid)
-        s = np.bincount(gid, weights=r[order])      # sum of ranks inside each group
-        r[order] = (s / cnt)[gid]                   # mean rank per element (vectorized)
+        # sum of ranks inside each group
+        s = np.bincount(gid, weights=r[order])
+        # mean rank per element (vectorized)
+        r[order] = (s / cnt)[gid]
 
     return r
 
@@ -82,20 +87,22 @@ _SNAP = {}   # panel snapshot memo: key -> (C, K)
 def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> pd.Series:
     close, ok = panels["hfq_close"], panels["can_trade"]
     rdates = list(rdates)
-    # --- pure numpy core: one snapshot, then integer row access (PITFALLS #24) ---
-    # No pandas .loc / .corr inside the loop: per-date row extraction was the last place
-    # where an occasional unwritten-page read could still corrupt the cross-section.
+    # --- 纯 numpy 的核心：先拍一次快照，之后全部用整数行号取数据（PITFALLS #24）---
+    # 循环里不用 pandas 的 .loc / .corr —— 逐日抽行曾经是最后一个"偶发读到未写入页"
+    # 导致横截面被污染的地方（症状是某一天的 Spearman 突然算不出来）
     cols = close.columns
     pos = {d: i for i, d in enumerate(close.index)}
-    # cache the big panel snapshots: identical for every factor (PITFALLS #24 perf)
+    # 把大面板快照缓存起来：每个因子看到的都是同一份，重复转 numpy 纯属浪费（PITFALLS #24）
     key = (id(close), id(ok), close.shape)
     if _SNAP.get("key") != key:
         _SNAP["key"] = key
-        _SNAP["C"] = np.ascontiguousarray(close.to_numpy(dtype="float64", copy=True))
+        _SNAP["C"] = np.ascontiguousarray(
+            close.to_numpy(dtype="float64", copy=True))
         _SNAP["K"] = np.ascontiguousarray(
             ok.reindex(columns=cols).fillna(False).to_numpy(dtype=bool, copy=True))
     C, K = _SNAP["C"], _SNAP["K"]
-    assert list(factor.columns) == list(cols), "factor columns must match panel columns"
+    assert list(factor.columns) == list(
+        cols), "factor columns must match panel columns"
     F = np.ascontiguousarray(factor.to_numpy(dtype="float64", copy=True))
     ri = np.array([pos.get(d, -1) for d in rdates], dtype=np.int64)
 
@@ -126,7 +133,8 @@ def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> 
 
 
 def ic_summary(ic: pd.Series) -> dict:
-    n = int(ic.notna().sum())            # valid periods (DEBT-013: len(ic) used to count NaN periods too)
+    # valid periods (DEBT-013: len(ic) used to count NaN periods too)
+    n = int(ic.notna().sum())        # 有效期数（DEBT-013：以前用 len(ic)，把 NaN 的期也算进去了）
     n_bad = int(len(ic) - n)             # invalid periods
     if n == 0:
         return {"ic_mean": float("nan"), "ic_std": float("nan"),
@@ -185,6 +193,18 @@ def layer_table(nav_df: pd.DataFrame, results=None, rf: float = 0.0) -> pd.DataF
     return pd.DataFrame(rows).set_index("层")
 
 
+def _blocked_pp(res, panels):
+    ex = res["blocked_buy"].index
+    hc = panels["hfq_close"].ffill().reindex(ex)
+    nxt = hc.shift(-1) / hc - 1.0
+    px = panels["hfq_open"].reindex(ex)
+    nav = res["nav_pre"].reindex(ex)
+
+    lost = (res["blocked_buy"] * px * nxt).sum(axis=1) \
+        - (res["blocked_sell"] * px * nxt).sum(axis=1)
+    return float(lost.div(nav).mean()) * 12 * 100
+
+
 def main():
     import time
     from backtest.panel import load_panels
@@ -195,21 +215,24 @@ def main():
 
     t0 = time.time()
     panels = load_panels()
-    rdates = [d for d in rebalance_dates(panels["hfq_close"].index) if d.year >= 2016]
+    rdates = [d for d in rebalance_dates(
+        panels["hfq_close"].index) if d.year >= 2016]
     W, layers = weights_for_factor("rev_20d", panels, rdates)
     res = run_all_layers(W, panels, rdates)
     nav_df = nav_frame(res)
 
-    print(f"面板 {panels['hfq_close'].shape} ｜ 调仓日 {len(rdates)} ｜ 用时 {time.time() - t0:.1f}s")
+    print(
+        f"面板 {panels['hfq_close'].shape} ｜ 调仓日 {len(rdates)} ｜ 用时 {time.time() - t0:.1f}s")
     print()
     print(layer_table(nav_df, res).round(4).to_string())
     print()
-    print("多空（三种定义）：", {k: f"{v:.2%}" for k, v in ls_summary(nav_df, rdates).items()})
+    print("多空（三种定义）：", {k: f"{v:.2%}" for k,
+          v in ls_summary(nav_df, rdates).items()})
 
     spec = FACTORS["rev_20d"]
     val = spec["fn"](build_features(panels, ["rev_20d"]), {}) * spec["sign"]
     print("IC：", {k: (round(v, 4) if isinstance(v, float) else v)
-                   for k, v in ic_summary(rank_ic(val, panels, rdates)).items()})
+                  for k, v in ic_summary(rank_ic(val, panels, rdates)).items()})
 
 
 if __name__ == "__main__":

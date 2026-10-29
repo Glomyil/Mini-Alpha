@@ -11,7 +11,7 @@ def listed(panels):  # 此函数用于检查已有缓存数据是否正常，所
 
 
 def _listed_np(panels):
-    """Same semantics as listed(), but pure numpy (no 15.5M-cell pandas cummax chain)."""
+    """和 listed() 一个语义，但走纯 numpy —— 不用 pandas 的 cummax 链（那玩意儿在 1550 万格上开临时数组）。"""
     a = panels["hfq_close"].notna().to_numpy()
     fwd = np.maximum.accumulate(a, axis=0)
     bwd = np.maximum.accumulate(a[::-1], axis=0)[::-1]
@@ -43,11 +43,13 @@ def ret(panels, n):  # 此函数用于校验日收益率变动，即今天收益
 
 
 def _roll(x, n, how):
-    """Rolling mean/std over axis 0, pure numpy, O(T*N) memory (no 3-D temporaries).
+    """沿时间轴滚动算均值 / 标准差。纯 numpy，内存只要 O(T*N) —— 不开三维临时数组。
 
-    how: "mean" | "std" (ddof=1). A window containing any NaN yields NaN (pandas min_periods=n).
-    Computed with cumsum so peak memory stays ~O(T*N) instead of O(T*N*n) -- the old
-    sliding-window version allocated ~2.5 GB per call (PITFALLS #24).
+    how 只能是 "mean" 或 "std"（std 用 ddof=1）。窗口里只要有一个 NaN，结果就是 NaN
+    —— 和 pandas 的 min_periods=n 一致。
+
+    这里用 cumsum 而不是滑窗，是为了把峰值内存压在 O(T*N)。
+    老版本每次调用会吃掉大约 2.5 GB（PITFALLS #24），对 2839×5471 的面板是致命的。
     """
     x = np.asarray(x, dtype="float64")
     T, N = x.shape
@@ -60,9 +62,9 @@ def _roll(x, n, how):
         c = np.vstack([np.zeros((1, a.shape[1])), c])
         return c[n:] - c[:-n]
 
-    # inf (amount == 0 divides by zero) must count as INVALID: feeding it into cumsum
-    # poisons every later window (inf - inf = NaN). Downstream isfinite filtering makes
-    # inf and NaN equivalent, so this matches the old pandas behaviour for the factor.
+    # inf 必须当"无效值"处理：amount == 0 时这里会除零得到 inf，
+    # 而 inf 一旦进了 cumsum，后面所有窗口都会被毒掉（inf - inf = NaN ✗）。
+    # 下游一律用 isfinite 过滤，inf 和 NaN 等价 ⇒ 和原来 pandas 版结果一致 ✓
     ok = np.isfinite(x)
     v = np.where(ok, x, 0.0)
     s1 = wsum(v)
@@ -78,10 +80,10 @@ def _roll(x, n, how):
 
 
 def _warm(fn, f, n):
-    """Warm-up invariant + fingerprint, same discipline as ret().
+    """检查 warm-up 期、打指纹 —— 和 ret() 同一套纪律。
 
-    A rolling(n) window can only produce its first value at row index n-1, so the warm-up
-    region is the first n-1 rows (ret() is a different construction: its first n rows are NaN).
+    rolling(n) 的窗口要到第 n-1 行才凑得满，所以 warm-up 区是【前 n-1 行】必须是 NaN。
+    注意 ret() 的构造不一样：它的前 n 行都是 NaN。差一行，别照着抄错。
     """
     warm = n - 1
     arr = f.to_numpy()

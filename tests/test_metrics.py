@@ -154,6 +154,28 @@ check(set(lsv) == {"比值法", "日差法", "月差法"} and near(lsv["比值�
       "ls_summary：三种定义齐全，默认最后一列=多头 / 第一列=空头")
 
 print("\n" + "=" * 46)
+print('\n── ⑧ 被白吃的 alpha（T-2.4）：被挡的单子错过了多少 ──')
+# 手工造的假 res —— 不跑 engine，纯测数学 ✓
+_EX = pd.DatetimeIndex(["2020-01-03", "2020-01-06"])
+
+
+def _fake_res(buy, sell, nav=1.0):
+    return {"blocked_buy": pd.DataFrame(buy, index=_EX, columns=["A"]),
+            "blocked_sell": pd.DataFrame(sell, index=_EX, columns=["A"]),
+            "nav_pre": pd.Series(nav, index=_EX)}
+
+
+_FLAT = {"hfq_close": pd.DataFrame([[10.0], [11.0]], index=_EX, columns=["A"]),
+         "hfq_open": pd.DataFrame([[10.0], [11.0]], index=_EX, columns=["A"])}
+
+pp = MT._blocked_pp(_fake_res([[0.05], [0.0]], [[0.0], [0.0]]), _FLAT)
+exp = 0.05 * 10 * 0.10 / 1.0 / 2 * 12 * 100     # 每期损失率 → 平均 → 年化 → %
+check(near(pp, exp, 1e-9), f"涨停挡掉 + 下期涨 10% ⇒ {pp:.6f}（手算 {exp:.6f}）")
+check(pp > 0.0, "少赚了 ⇒ 必须是正数")
+
+pp0 = MT._blocked_pp(_fake_res([[0.0], [0.0]], [[0.0], [0.0]]), _FLAT)
+check(abs(pp0) < 1e-12, f"什么都没挡 ⇒ 必须恰好 0（实际 {pp0:.3e}）")
+
 check(passed + failed >= 20, f"断言条数守卫：{passed + failed} 条")
 print(f"结果: 通过 {passed} / {passed + failed}")
 if failed:

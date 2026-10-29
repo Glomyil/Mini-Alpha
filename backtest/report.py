@@ -73,7 +73,8 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
 
     ic = ic_sum = None
     if panels is not None and factor is not None:
-        if factor_val is None:                     # not provided -> compute it once (legacy path)
+        # not provided -> compute it once (legacy path)
+        if factor_val is None:
             from backtest.assemble import build_features
             from backtest.factors import FACTORS
             spec = FACTORS[factor]
@@ -96,8 +97,34 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             "periods_per_year": MT.REBALANCE_PERIODS_PER_YEAR, "val_basis": val_basis,
             "fee_buy": 0.00025, "fee_sell": 0.00075, "slippage": 0.0005, "stamp": stamp}
 
-    parts = [f"# 因子回测报告 · `{factor}`", "", banner(meta), "",
-             "## 1. 分层指标", "", md_table(layer_tab), ""]
+
+    parts = [f"# 因子回测报告 · `{factor}`", "", banner(meta), ""]
+
+    # ── 成交失败（T-2.4）：放在首屏，在「## 1. 分层指标」之前 ──
+    # ⚠️ res 是 list[dict]（每层一个账本，来自 run_all_layers），不是单个 dict。
+    #    报告用【最高层】（res[-1]）的账本来报 —— 和 ROADMAP 里「层4 掉多少 pp」对得上 ✓
+    _top = res[-1] if isinstance(res, (list, tuple)) and len(res) > 0 else None
+    if _top is not None and panels is not None and "blocked_buy" in _top:
+        ex = _top["blocked_buy"].index
+        n_ex = len(ex)
+        bb, bs = _top["blocked_buy"], _top["blocked_sell"]
+        r = panels["reason"].reindex(ex) if "reason" in panels else None
+
+        n_buy = int((bb > 0).to_numpy().sum())
+        n_lu = int(((bb > 0) & (r == 2)).to_numpy().sum()) if r is not None else 0
+        n_ld = int(((bs > 0) & (r == 3)).to_numpy().sum()) if r is not None else 0
+
+        pp = MT._blocked_pp(_top, panels)
+        parts += [
+            "## 0. 成交失败（P2 核心结论）", "",
+            f"- 目标买入里，**{n_lu} 笔撞上涨停**没买成（共 {n_ex} 期）",
+            f"- 目标卖出里，**{n_ld} 笔撞上跌停**没卖成",
+            f"- 另有 **{n_buy - n_lu} 笔**因停牌 / 不在市 / 无价没买成",
+            f"- 这些没成交的单子，一年大约 **{pp:.2f} pp** 收不到",
+            "",
+        ]
+
+    parts += ["## 1. 分层指标", "", md_table(layer_tab), ""]
     if ic_sum is not None:
         logger.info(f"ic 有效:{ic_sum['n']} 无效:{ic_sum.get('n_bad', 0)} "
                     f"mean:{ic_sum['ic_mean']:.4f} ir:{ic_sum['ic_ir']:.4f}")
