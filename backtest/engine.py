@@ -18,7 +18,7 @@ def _panel_arrays(panels, cols):
            id(panels["can_trade"]), id(panels["reason"]), tuple(cols))
     if _PANEL_SNAP.get("key") == key:
         return (_PANEL_SNAP["op"], _PANEL_SNAP["vl"], _PANEL_SNAP["ct"],
-                _PANEL_SNAP["cb"], _PANEL_SNAP["cs"], _PANEL_SNAP["_rs"])
+                _PANEL_SNAP["cb"], _PANEL_SNAP["cs"])
 
     # 按【标签】对齐（等价老的 panels[...][cols]）：先拿到列的整数位置，再用 numpy 选列
     # 按标签取列：W 里如果有面板不存在的股票代码，这里会直接抛 KeyError（不许静默缺列）
@@ -50,8 +50,8 @@ def _panel_arrays(panels, cols):
         assert float(np.isfinite(vl).mean(
         )) > 0.3, "hfq_close ffill mostly non-finite -- snapshot degraded"
 
-    _PANEL_SNAP.update(key=key, op=op, vl=vl, ct=ct, cb=cb, cs=cs, _rs=_rs)
-    return op, vl, ct, cb, cs, _rs
+    _PANEL_SNAP.update(key=key, op=op, vl=vl, ct=ct, cb=cb, cs=cs)
+    return op, vl, ct, cb, cs
 
 
 def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, slippage=0.0005, init_cash=1.0):
@@ -208,8 +208,8 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
     fees = pd.Series(fees_a, index=exec_days)
     trades = pd.DataFrame(trades_a, index=exec_days, columns=cols)
     shares_hist = pd.DataFrame(shares_a, index=exec_days, columns=cols)
-    block_buy = pd.DataFrame(blocked_buy_a, index=exec_days, column=cols)
-    block_sell = pd.DataFrame(blocked_sell_a, index=exec_days, column=cols)
+    blocked_buy = pd.DataFrame(blocked_buy_a, index=exec_days, columns=cols)
+    blocked_sell = pd.DataFrame(blocked_sell_a, index=exec_days, columns=cols)
 
     if n_empty > max(2, len(exec_days) // 10):
         raise AssertionError(
@@ -219,7 +219,7 @@ def run_layer(W_layer, panels, rdates, *, fee_buy=0.00025, fee_sell=0.00075, sli
                        f"turnover:{float(turnover.sum()):.4f} fees:{float(fees.sum()):.4f}")
     return {"nav": nav, "nav_open": nav_open, "nav_pre": nav_pre_s, "cash": cash_s,
             "turnover": turnover, "fees": fees, "trades": trades, "shares": shares_hist,
-            "block_buy": block_buy, "block_sell": block_sell}
+            "blocked_buy": blocked_buy, "blocked_sell": blocked_sell}
 
 
 def run_all_layers(W, panels, rdates, **kw):
