@@ -6,6 +6,7 @@ from backtest import metrics as MT
 from pathlib import Path
 from loguru import logger
 import matplotlib
+import matplotlib.ticker
 matplotlib.use("Agg")
 
 
@@ -16,7 +17,7 @@ OUT = Path(__file__).resolve().parent.parent / "reports"
 
 
 def md_table(df: pd.DataFrame, index_name: str = "层",
-             pct_cols=("年化", "波动", "最大回撤")) -> str:
+             pct_cols=("年化", "波动", "最大回撤", "基准年化", "超额")) -> str:
     cols = [index_name]+[str(c)for c in df.columns]
     head = "|"+"|".join(cols)+"|"
     sep = "|"+"|".join(":--"for _ in cols)+"|"
@@ -46,19 +47,41 @@ def banner(meta: dict) -> str:
     ])
 
 
-def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲线") -> Path:
-    """画 5 层净值（只画真实点，不 ffill；只 savefig，不 show）"""
+def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲线",
+             bench: pd.Series | None = None) -> Path:
+    """画 5 层净值 + 可选基准线（只画真实点，不 ffill；只 savefig，不 show）。
+
+    2026-10-30（T-3.1）三处修改，都是为了让图真的能读：
+      · 基准线要【先归一化到 1.0】：它从 2015 年累乘起，直接叠到 2016 起的 nav 上
+        会从 1.6 开始 —— 表里的年化没错，但图上起点不同等于骗人。
+      · y 轴改【对数】：净值跨 0.5~4.0 时，线性轴会把中间几层压成一团看不清。
+      · 多空（层4净值 / 层0净值）是【比值】不是【净值】，必须挪到右轴，
+        否则它跳到 3.5 会把左轴的 5 层全部压扁（旧版的图就是这个毛病）。
+    """
     fig, ax = plt.subplots(figsize=(9, 4.6), dpi=110)
     for L in nav_df.columns:
-        ax.plot(nav_df.index, nav_df[L].to_numpy(), lw=1.4, label=f"层 {L}")
-    ls = nav_df[nav_df.columns[-1]] / nav_df[nav_df.columns[0]]
-    ax.plot(nav_df.index, ls.to_numpy(), lw=1.6,
-            ls="--", color="#c0392b", label="多空(比值法)")
+        ax.plot(nav_df.index, nav_df[L].to_numpy(), lw=1.2, alpha=0.85, label=f"层 {L}")
+    if bench is not None:
+        ax.plot(bench.index, bench.to_numpy(), lw=2.4, color="#2c7fb8",
+                label="基准(全A等权)")
     ax.axhline(1.0, color="#9aa5b1", lw=0.8)
+    ax.set_yscale("log")
+    ax.set_yticks([0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0])
+    ax.get_yaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
+    ax.set_ylabel("净值（对数轴，起点 = 1.0）")
+
+    ls = nav_df[nav_df.columns[-1]] / nav_df[nav_df.columns[0]]
+    ax2 = ax.twinx()
+    ax2.plot(nav_df.index, ls.to_numpy(), lw=1.2, ls="--", color="#c0392b",
+             alpha=0.55, label="多空(比值法)")
+    ax2.set_ylabel("多空比值", fontsize=8, color="#c0392b")
+    ax2.tick_params(labelsize=7, colors="#c0392b")
+
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, ncol=4, fontsize=8, frameon=False, loc="upper left")
     ax.set_title(title)
-    ax.set_ylabel("净值（起点 = 1.0）")
-    ax.legend(ncol=6, fontsize=8, frameon=False)
-    ax.grid(alpha=0.25)
+    ax.grid(alpha=0.25, which="both")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path)
@@ -69,6 +92,21 @@ def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲�
 def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Path = OUT,
                  val_basis: str = "close", note: str = "", factor_val=None) -> dict:
     layer_tab = MT.layer_table(nav_df, res, rf=rf)
+
+    # ── T-3.1 基准线：全 A 等权（每日再平衡、未扣费，基准偏高 => 超额偏保守）──
+    _bench = None
+    if panels is not None and "ret_1d_hfq" in panels and "can_trade" in panels:
+        _bench = MT.equal_weight_nav(panels).reindex(nav_df.index).ffill()
+        # 归一化到 1.0：它从 2015 年累乘起，直接叠到 2016 起的 nav 上会从 1.6 开始。
+        # 年化不受影响（ann_return 是相对算的），但图上起点不一致等于骗人 ✗
+        _bench = _bench / float(_bench.iloc[0])
+        _bann = MT.ann_return(_bench)
+        layer_tab["基准年化"] = _bann
+        layer_tab["超额"] = layer_tab["年化"] - _bann
+    else:
+        layer_tab["基准年化"] = "缺基准数据"
+        layer_tab["超额"] = "缺基准数据"
+
     ls = MT.ls_summary(nav_df, rdates)
 
     ic = ic_sum = None
@@ -91,12 +129,11 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
         for _p in (md, png):
             if _p.exists():
                 shutil.copy2(_p, _p.with_name(_p.stem + "_prev" + _p.suffix))
-    nav_plot(nav_df, png, title=f"{factor} 分层净值")
+    nav_plot(nav_df, png, title=f"{factor} 分层净值", bench=_bench)
     meta = {"factor": factor, "start": nav_df.index[0].date(), "end": nav_df.index[-1].date(),
             "n_rdate": len(rdates), "trading_days": MT.TRADING_DAYS,
             "periods_per_year": MT.REBALANCE_PERIODS_PER_YEAR, "val_basis": val_basis,
             "fee_buy": 0.00025, "fee_sell": 0.00075, "slippage": 0.0005, "stamp": stamp}
-
 
     parts = [f"# 因子回测报告 · `{factor}`", "", banner(meta), ""]
 
@@ -111,8 +148,10 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
         r = panels["reason"].reindex(ex) if "reason" in panels else None
 
         n_buy = int((bb > 0).to_numpy().sum())
-        n_lu = int(((bb > 0) & (r == 2)).to_numpy().sum()) if r is not None else 0
-        n_ld = int(((bs > 0) & (r == 3)).to_numpy().sum()) if r is not None else 0
+        n_lu = int(((bb > 0) & (r == 2)).to_numpy().sum()
+                   ) if r is not None else 0
+        n_ld = int(((bs > 0) & (r == 3)).to_numpy().sum()
+                   ) if r is not None else 0
 
         pp = MT._blocked_pp(_top, panels)
         parts += [
@@ -135,7 +174,8 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
               "| 定义 | 累计 |", "| :-- | --: |"] + \
         [f"| {k} | {v:.2%} |" for k, v in ls.items()] + [""]
     # 零依赖版 Spearman（pandas 那个要 scipy，requirements 里没有 ✗）
-    mono = MT.spearman_rank(layer_tab["年化"].tolist(), list(range(len(layer_tab))))
+    mono = MT.spearman_rank(
+        layer_tab["年化"].tolist(), list(range(len(layer_tab))))
     mono_txt = "nan" if mono is None else f"{mono:.3f}"
     parts += ["## 4. 结论（机械生成，不掺主观）", "",
               f"- 层号 vs 年化的 Spearman = **{mono_txt}**（越接近 1 越单调；< 0 说明高分位反而差）",

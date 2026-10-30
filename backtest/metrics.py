@@ -236,6 +236,12 @@ def _blocked_pp(res, panels):
     return float(lost.div(nav).mean()) * 12 * 100
 
 
+def equal_weight_nav(panels):
+    r = panels["ret_1d_hfq"].where(panels["can_trade"])
+    daily = r.mean(axis=1).fillna(0.0)
+    return (1.0 + daily).cumprod()
+
+
 def main():
     import time
     from backtest.panel import load_panels
