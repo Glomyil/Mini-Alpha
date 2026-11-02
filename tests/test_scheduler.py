@@ -60,7 +60,9 @@ src = MAIN.read_text(encoding="utf-8")
 code_lines = [l for l in src.splitlines() if not l.strip().startswith("#")]
 
 n_2016 = sum(1 for l in code_lines if "2016" in l)
-check(n_2016 == 1, f"口径单源：`2016` 在 main.py 代码行中只出现 1 次（实测 {n_2016}）")
+# 2026-11-02 T-3.3：since 从 main.py 的 SINCE 常量搬到 application.yml 的 research.since，
+# 代码里应当【一次都不出现】—— 比原来的"只出现 1 次"更彻底。
+check(n_2016 == 0, f"口径单源：`2016` 在 main.py 里已清零（实测 {n_2016}）")
 n_filter = len(re.findall(r"year\s*>=", src))
 check(n_filter <= 1, f"`year >=` 不超过 1 处（实测 {n_filter}）")
 
@@ -89,10 +91,12 @@ print("── B. 功能检查（真数据，约 15 秒）──")
 panels = load_panels()
 check(sorted(panels) == ["amount", "can_trade", "hfq_close", "hfq_open", "reason", "ret_1d_hfq"],
       f"面板 6 张表（T-2.2 加了 reason）：{sorted(panels)}")
-check(panels["hfq_close"].shape == (2839, 5471), f"面板形状 {panels['hfq_close'].shape}")
+# 2026-11-01 增量更新到 2026-10-29（+32 个交易日 + 补 63 只清单遗漏的票）
+check(panels["hfq_close"].shape == (2871, 5476), f"面板形状 {panels['hfq_close'].shape}")
 
 rdates = [d for d in rebalance_dates(panels["hfq_close"].index) if d.year >= SINCE]
-check(len(rdates) == 129, f"调仓日 {len(rdates)} 个（期望 129）")
+# 2026-11-01 数据更新后多了 2026-10-29 那一期（129 → 130）
+check(len(rdates) == 130, f"调仓日 {len(rdates)} 个（期望 130）")
 check(all(d.year >= SINCE for d in rdates), "全部 ≥ 2016（含 2016 本身，不是 >）")
 check(all(d in panels["hfq_close"].index for d in rdates), "调仓日都是面板里的真实交易日")
 
@@ -105,7 +109,8 @@ check([t for t in FACTORS["amihud_20d"].get("requires", []) if t not in panels_n
 
 W, layers = weights_for_factor(FACTOR, panels, rdates)
 check(isinstance(W, list) and len(W) == 5, f"W 是 list[5]（实测 {type(W).__name__}/{len(W)}）")
-check(layers.shape == (129, 5471), f"layers 形状 {layers.shape}")
+# 同上：多一期 + 多 5 只票
+check(layers.shape == (130, 5476), f"layers 形状 {layers.shape}")
 rowsum = np.round(W[0].sum(axis=1).to_numpy(), 6)
 check(bool(np.isin(rowsum, [0.0, 1.0]).all()), "W 每行权重和 ∈ {0.0, 1.0}（满仓或空层）")
 check(int(layers.to_numpy().min()) == -1 and int(layers.to_numpy().max()) == 4,
@@ -113,12 +118,16 @@ check(int(layers.to_numpy().min()) == -1 and int(layers.to_numpy().max()) == 4,
 
 res = run_all_layers(W, panels, rdates)
 check(isinstance(res, list) and len(res) == 5, "res 是 list[5]")
-check(set(res[0]) == {"nav", "nav_open", "nav_pre", "cash", "turnover", "fees", "trades", "shares"},
-      "每层 8 本账")
+# 2026-11-02 更正：T-2.4（成交失败）给每层加了 blocked_buy / blocked_sell 两本账，
+# 从那时起这条断言就该改成 10 —— 但 test_scheduler 跑真数据、平时没人跑，一直没被发现。
+check(set(res[0]) == {"nav", "nav_open", "nav_pre", "cash", "turnover", "fees",
+                      "trades", "shares", "blocked_buy", "blocked_sell"},
+      "每层 10 本账（T-2.4 加了 blocked_buy / blocked_sell）")
 check(abs(float(res[0]["nav"].iloc[0]) - 1.0) < 1e-12, "净值从 1.0 起步（每层独立账户）")
 
 nav_df = nav_frame(res)
-check(nav_df.shape == (2839, 5) and list(nav_df.columns) == [0, 1, 2, 3, 4],
+# 2026-11-01 数据更新后 2871 行
+check(nav_df.shape == (2871, 5) and list(nav_df.columns) == [0, 1, 2, 3, 4],
       f"nav_df {nav_df.shape}，列 = 层号 0..4")
 
 shutil.rmtree(TMP, ignore_errors=True)

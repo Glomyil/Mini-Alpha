@@ -60,7 +60,8 @@ def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲�
     """
     fig, ax = plt.subplots(figsize=(9, 4.6), dpi=110)
     for L in nav_df.columns:
-        ax.plot(nav_df.index, nav_df[L].to_numpy(), lw=1.2, alpha=0.85, label=f"层 {L}")
+        ax.plot(nav_df.index, nav_df[L].to_numpy(),
+                lw=1.2, alpha=0.85, label=f"层 {L}")
     if bench is not None:
         ax.plot(bench.index, bench.to_numpy(), lw=2.4, color="#2c7fb8",
                 label="基准(全A等权)")
@@ -79,7 +80,8 @@ def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲�
 
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, ncol=4, fontsize=8, frameon=False, loc="upper left")
+    ax.legend(h1 + h2, l1 + l2, ncol=4, fontsize=8,
+              frameon=False, loc="upper left")
     ax.set_title(title)
     ax.grid(alpha=0.25, which="both")
     fig.tight_layout()
@@ -90,7 +92,8 @@ def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲�
 
 
 def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Path = OUT,
-                 val_basis: str = "close", note: str = "", factor_val=None) -> dict:
+                 val_basis: str = "close", note: str = "", factor_val=None,
+                 split: str = "") -> dict:
     layer_tab = MT.layer_table(nav_df, res, rf=rf)
 
     # ── T-3.1 基准线：全 A 等权（每日再平衡、未扣费，基准偏高 => 超额偏保守）──
@@ -164,29 +167,54 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
         ]
 
     parts += ["## 1. 分层指标", "", md_table(layer_tab), ""]
+
+    # ── T-3.3 §2 分段对比：split 为空则整节跳过（空转也留痕，PITFALLS 1096）──
+    seg = None
+    if split:
+        seg = segment_table(nav_df, split, bench=_bench)
+        if len(seg) == 0:
+            logger.warning(f"{factor} 分段表为空：split={split!r} 未产生任何段")
+        else:
+            parts += ["## 2. 分段对比", "",
+                      f"> 分界点：`{split}`（来自 application.yml 的 research.split）", "",
+                      md_table(seg.set_index("段"), index_name="段",
+                               pct_cols=("层0年化", "层0超额",
+                                         "层4年化", "层4超额")), ""]
+    else:
+        logger.info(f"{factor} 分段跳过：split 为空（不分段模式）")
+
+    # ── T-3.3 §3 年度 IC：ic 已在作用域里（rank_ic 返回的就是逐期 Series）──
+    yic = None
+    if ic is not None and len(ic) > 0:
+        yic = yearly_ic_table(ic)
+        parts += ["## 3. 年度 IC（标签 = 下一个调仓日的区间收益）", "",
+                  md_table(yic, index_name="年",
+                           pct_cols=("IC均值", "IC胜率")), ""]
     if ic_sum is not None:
         logger.info(f"ic 有效:{ic_sum['n']} 无效:{ic_sum.get('n_bad', 0)} "
                     f"mean:{ic_sum['ic_mean']:.4f} ir:{ic_sum['ic_ir']:.4f}")
-        parts += ["## 2. IC（标签 = 下一个调仓日的区间收益）", "",
+        parts += ["## 4. IC（标签 = 下一个调仓日的区间收益）", "",
                   f"- IC 均值 **{ic_sum['ic_mean']:.4f}** ｜ 标准差 {ic_sum['ic_std']:.4f} "
                   f"｜ **IC-IR {ic_sum['ic_ir']:.4f}** ｜ 期数 {ic_sum['n']}", ""]
-    parts += ["## 3. 多空（三种定义）", "",
+    parts += ["## 5. 多空（三种定义）", "",
               "| 定义 | 累计 |", "| :-- | --: |"] + \
         [f"| {k} | {v:.2%} |" for k, v in ls.items()] + [""]
     # 零依赖版 Spearman（pandas 那个要 scipy，requirements 里没有 ✗）
     mono = MT.spearman_rank(
         layer_tab["年化"].tolist(), list(range(len(layer_tab))))
     mono_txt = "nan" if mono is None else f"{mono:.3f}"
-    parts += ["## 4. 结论（机械生成，不掺主观）", "",
+    parts += ["## 6. 结论（机械生成，不掺主观）", "",
               f"- 层号 vs 年化的 Spearman = **{mono_txt}**（越接近 1 越单调；< 0 说明高分位反而差）",
               f"- 最高层：层 {layer_tab['年化'].idxmax()}（年化 {layer_tab['年化'].max():.2%}）",
               f"- 最低层：层 {layer_tab['年化'].idxmin()}（年化 {layer_tab['年化'].min():.2%}）", ""]
     if note:
-        parts += ["## 5. 备注", "", note, ""]
+        parts += ["## 7. 备注", "", note, ""]
     parts += [f"![分层净值]({png.name})", ""]
 
     md.write_text("\n".join(parts), encoding="utf-8")
-    return {"md": md, "png": png, "layer_tab": layer_tab, "ls": ls, "ic": ic, "ic_summary": ic_sum}
+    return {"md": md, "png": png, "layer_tab": layer_tab, "ls": ls,
+            "ic": ic, "ic_summary": ic_sum,
+            "segment": seg, "yearly_ic": yic}
 
 
 def main():
@@ -204,6 +232,59 @@ def main():
     print("报告:", out["md"])
     print("图  :", out["png"])
     print(out["layer_tab"].round(4).to_string())
+
+
+def segment_table(nav_df, splits, *, bench=None, layers=(0, 4)):
+    splits = [s.strip() for s in str(splits).split(",") if s.strip()]
+    idx = nav_df.index
+    if not splits:
+        return pd.DataFrame()          # 不分段 ⇒ 空表，调用方据此跳过整节
+
+    # 边界对齐：split 必须落在 idx 上，落在两期之间取前一期
+    cuts = []
+    for s in splits:
+        t = pd.Timestamp(s)
+        if t < idx[0] or t > idx[-1]:
+            raise ValueError(
+                f"split={s} 不在回测区间 {idx[0].date()}~{idx[-1].date()} 内")
+        pos = idx.searchsorted(t, side="right") - 1
+        cuts.append(idx[pos])
+
+    bounds = [idx[0]] + cuts + [idx[-1]]
+    rows = []
+    for i in range(len(bounds) - 1):
+        a, b = bounds[i], bounds[i + 1]
+        seg = nav_df.loc[a:b]
+        if len(seg) < 2:
+            rows.append({"段": f"{i+1}", "起": a.date(), "止": b.date(),
+                         "天数": len(seg), "备注": "数据不足"})
+            continue
+        row = {"段": f"{i+1}", "起": a.date(), "止": b.date(), "天数": len(seg)}
+        for L in layers:
+            s = seg[L]
+            norm = s / s.iloc[0]        # ★ 例外③：段内归一化
+            row[f"层{L}年化"] = MT.ann_return(norm)       # ★ 例外①：独立算
+            if bench is not None:
+                bs = bench.loc[a:b]
+                bn = bs / bs.iloc[0]    # ★ 例外②：基准也归一化
+                row[f"层{L}超额"] = MT.ann_return(norm) - MT.ann_return(bn)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def yearly_ic_table(ic_series) -> pd.DataFrame:
+    """按年分组算 IC 均值 / 期数 / 正比例。
+
+    ic_series : pd.Series  逐期 IC（index 是调仓日）
+    """
+    df = ic_series.dropna()
+    g = df.groupby(df.index.year)
+    out = pd.DataFrame({
+        "期数":   g.size(),
+        "IC均值": g.mean(),
+        "IC胜率": g.apply(lambda s: float((s > 0).mean())),
+    })
+    return out
 
 
 if __name__ == "__main__":

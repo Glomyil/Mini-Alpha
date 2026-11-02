@@ -28,7 +28,6 @@ from config.research_spec import load_spec, save_snapshot
 
 OUT = Path(__file__).resolve().parent/"reports"
 
-SINCE = 2016
 
 LOG_PATH = Path(__file__).resolve().parent / "logs" / "run.log"
 
@@ -56,19 +55,18 @@ def main():
     config_check()
     init_log()                                                    # 关键数字落盘（日志教学参考 §5）
     panels = load_panels()  # 缓存提到循环外
-    spec = load_spec(since=SINCE, until=str(
-        panels["hfq_close"].index[-1].date()))
+    spec = load_spec(until=str(panels["hfq_close"].index[-1].date()))
     save_snapshot(spec)
     logger.info(f"RUN {spec.banner()}")
 
     # —— 运行身份（2026-10-14）：这一行让以后的任何一行数字都能回答"哪份代码 + 哪份数据"——
     _fp = hashlib.md5(panels["hfq_close"].to_numpy().tobytes()).hexdigest()[:8]
-    logger.info(f"RUN 区间:{SINCE}+ 因子:{len(FACTORS)} panel:{_fp} "
+    logger.info(f"RUN 区间:{spec.since}+ 因子:{len(FACTORS)} panel:{_fp} "
                 f"shape:{panels['hfq_close'].shape}")
     rdates = [d for d in rebalance_dates(
-        panels["hfq_close"].index) if d.year >= SINCE]
+        panels["hfq_close"].index) if d.year >= spec.since]
 
-    logger.info(f"RUN SINCE:{SINCE} 首个调仓日:{rdates[0].date()} 调仓:{len(rdates)}期 "
+    logger.info(f"RUN SINCE:{spec.since} 首个调仓日:{rdates[0].date()} 调仓:{len(rdates)}期 "
                 f"因子:{len(FACTORS)} panel:{_fp} shape:{panels['hfq_close'].shape}")
 
     for i, name in enumerate(FACTORS, 1):
@@ -111,7 +109,7 @@ def main():
                     f"行数 {len(_nav_full)}→{len(_nav)} (drops {len(_nav_full) - len(_nav)})")
 
         out = RP.build_report(name, _nav, panels, rdates,
-                              res, outdir=OUT, factor_val=_fval)
+                              res, outdir=OUT, factor_val=_fval, split=spec.split)
 
         tv = [float(res[k]["turnover"].sum()) for k in range(len(res))]
         logger.info(f"{name} | 区间 {_nav.index[0].date()} | 层0换手 {tv[0]:.4f} "

@@ -1984,3 +1984,120 @@ def layer_table(nav_df, results=None, rf=0.0):
     #24  写入权交给库      → 那条是"别自己写"，这条是"库自己会改语义"
     #26  冗余要校验        → 那条防"两份不一致"，这条防"一份本身就被静默改了"
 
+
+
+---
+
+## #28 【wiring 断裂】改了两端，但中间没接上 —— 单文件全对，程序跑不起来
+
+**发现日期**：2026-11-02（T-3.3 分段分析）
+**发现方式**：**两轴独立代码审查（Standards / Spec）各自抓到同一条** —— 这是本条最值钱的部分，见下方「为什么值得单独记一条」
+
+### 现象
+
+```
+$ python main.py
+TypeError: build_report() got an unexpected keyword argument 'split'
+⇒ 第一个因子就崩，报告一份都出不来
+```
+
+改动分布在 4 个文件，分别是：
+
+| 文件 | 改动 | 单独看对不对 |
+|---|---|---|
+| `config/application.yml` | 加 `research.split: "2020-08-31"` | ✅ 对 |
+| `config/research_spec.py` | `RunSpec` 加 `split` 字段 + 进 `fingerprint()` | ✅ 对（实测 hash 随 split 变） |
+| `main.py` | 传 `split=spec.split` 给 `build_report` | ✅ 对（确实该传） |
+| `backtest/report.py` | 新增 `segment_table()` / `yearly_ic_table()` | ✅ 对（两函数独立测过，边界/多段/越界全 OK） |
+
+**四个文件单独看都没问题，但它们之间的两条线断了**：
+
+```
+① main.py ──传 split=──✗──> build_report 的签名里没有这个参数
+② report.py 里新增的两个函数 ──✗──> 全仓零调用者（死代码）
+```
+
+### 根因
+
+**"改了两端"的错觉**：
+
+```
+main.py 里写了 split=spec.split        ⇒ 我觉得"主程序改好了"
+report.py 里写了 segment_table()        ⇒ 我觉得"报告层改好了"
+⇒ ⇒ 但【谁调用谁】这一层，我在两个文件里【都没写】
+⇒ ⇒ ⇒ 【因为它在"两个文件之间"，不属于任何一个文件】
+```
+
+⇒ **这是典型的「接缝处的缺陷」**：每一块都对，缝没焊上。
+
+### 为什么值得单独记一条：**两轴独立审查的交集**
+
+代码审查分成两个**互不通信**的轴（各自独立 sub-agent）：
+
+```
+Standards 轴（只看符不符合本仓规范）
+  ⇒ 抓到：「改动整体不可运行：main.py:112 传 split= 给 build_report(report.py:94 形参无 split) → TypeError；
+           新增 segment_table/yearly_ic_table 全仓零调用者（死代码）」
+
+Spec 轴（只看需求有没有被忠实实现）
+  ⇒ 抓到：「main.py:111-112 传入 split=spec.split，但 build_report 没有该参数，也无 **kwargs。
+           实测 TypeError，python main.py 在第一个因子就崩」
+```
+
+⇒ ⇒ **两个轴【互不知道对方在看什么】，却独立指向同一行代码** ✓✓
+⇒ ⇒ ⇒ 这就是**最高置信度的缺陷信号** —— 比任何单一审查都强
+
+**但也暴露了两轴的盲区**（同一次审查中）：
+
+| 轴 | 判错的一条 | 为什么错 |
+|---|---|---|
+| Spec 轴 | 「`MT.rank_ic()` 加 `return_series=False` 未实现，`yearly_ic_table` 是死代码」 | **只读了 spec 里"推荐 A"那句话，没去看 `rank_ic` 的返回类型标注** —— 它本来就返回 `pd.Series`（实测 len=129），根本不用改 |
+| Standards 轴 | 同上（没提这条） | — |
+
+⇒ ⇒ **教训**：**审查报告也要实测验证**，不能直接当成结论 ✓
+
+### 修复
+
+```python
+# ① build_report 加一个带默认值的参数（默认空 ⇒ 旧调用零影响，33 条 test_report 全过）
+def build_report(..., factor_val=None, split: str = "") -> dict:
+
+# ② 在 §1 之后真的【调用】两个新函数
+    seg = None
+    if split:
+        seg = segment_table(nav_df, split, bench=_bench)
+        ...
+    yic = None
+    if ic is not None and len(ic) > 0:
+        yic = yearly_ic_table(ic)          # ic 本来就在作用域里（rank_ic 返回的就是逐期 Series）
+        ...
+```
+
+### 检测方法（下次动手前先用）
+
+```powershell
+# ① 新增的函数有没有调用者？（返回空 = 死代码）
+grep -rn "segment_table\|yearly_ic_table" --include=*.py .
+
+# ② 改了签名，所有调用点都跟上了吗？
+grep -rn "build_report(" --include=*.py .
+
+# ③ 最可靠的一条：直接跑
+python main.py
+```
+
+### 教训
+
+> **「单文件都改对了」不等于「程序能跑」。**
+> 缺陷最喜欢住在**两个文件的接缝处** —— 那里不属于任何一个人"自己的文件"。
+>
+> 所以：
+> 1. **改接口的两端时，改完立刻跑一次** —— 不要攒到最后
+> 2. **新增函数后 grep 一次函数名** —— 没调用者就是死代码
+> 3. **两轴独立审查的交集 = 最可信的缺陷**，但**单轴的结论必须实测**（它可能只读了你 spec 里的一句话）
+
+### 与前面几条的关系
+
+    #23 偶发非确定性   → 那条是"同一个输入跑出不同结果"，这条是"根本跑不起来"
+    #26 冗余不校验     → 那条防"两份不一致"，这条防"一份写了但没接上"
+    #19 默认值藏口径   → 那条说"隐性默认值会分叉"，这条说"显性参数也会断链"

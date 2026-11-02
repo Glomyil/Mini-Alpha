@@ -15,19 +15,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 # 两个版本：只差 n_layers
-SPEC_A = dict(since=2016, until="2026-09-07", n_layers=5,
+# split 显式传值：application.yml 里现在写着 "2020-08-31"，不传就会被它盖住，
+# 那样测试的结果取决于配置文件 —— 不是测试该有的样子。
+SPEC_A = dict(since=2016, until="2026-09-07", split="", n_layers=5,
               fee_buy=0.00025, fee_sell=0.00075, slippage=0.0005)
 SPEC_B = dict(SPEC_A, n_layers=10)
 
-FIELDS = ["since", "until", "fee_buy", "fee_sell", "slippage",
+# 2026-11-02 T-3.3：加 split（放在 until 后面，语义相邻）⇒ 9 段变 10 段
+FIELDS = ["since", "until", "split", "fee_buy", "fee_sell", "slippage",
           "n_layers", "trading_days", "periods_per_year", "init_cash"]
 
 
 # ── T1 指纹的格式是契约 ────────────────────────────────────
-def test_fingerprint_has_nine_ordered_fields():
+def test_fingerprint_has_ten_ordered_fields():
     fp = R.load_spec(**SPEC_A).fingerprint()
     parts = fp.split("|")
-    assert len(parts) == 9, "指纹应被 | 分成 9 段，实际 %r" % fp
+    assert len(parts) == 10, "指纹应被 | 分成 10 段，实际 %r" % fp
     names = [p.split("=", 1)[0] for p in parts]
     assert names == FIELDS, "字段顺序变了：%r" % names
 
@@ -37,6 +40,7 @@ def test_fingerprint_values_are_not_glued_together():
     fp = R.load_spec(**SPEC_A).fingerprint()
     assert "since=2016until=" not in fp
     assert "since=2016|until=" in fp
+    assert "until=2026-09-07|split=" in fp or "until=2026-09-07split=" not in fp
 
 
 # ── T2 同一版本多次算，hash 必须完全相同 ────────────────────
@@ -74,3 +78,18 @@ def test_snapshot_writes_fingerprint_and_yaml_copy(tmp_path, monkeypatch):
     assert out.name.endswith(spec.cfg_hash)
     assert (out / "spec.txt").read_text(encoding="utf-8").strip() == spec.fingerprint()
     assert (out / "application.yml").exists()
+
+# ── T7 改 split，hash 必须变（加这个字段的唯一目的）─────
+def test_changing_split_changes_hash():
+    """split 是口径的一部分：同一份数据切在不同日期 => 必须能被台账区分。
+
+    如果 split 没进 fingerprint，两个不同分界的报告会算出同一个 cfg_hash，
+    台账里两行分不清「这份用的是哪个分界」—— 那就等于不知道自己在看什么。
+    """
+    a = R.load_spec(**dict(SPEC_A, split="2020-08-31")).cfg_hash
+    b = R.load_spec(**dict(SPEC_A, split="2021-06-30")).cfg_hash
+    c = R.load_spec(**dict(SPEC_A, split="")).cfg_hash
+
+    assert a != b, "换分界点 hash 没变 => split 没进 fingerprint"
+    assert a != c, "有分界 vs 无分界 hash 没变"
+    assert len({a, b, c}) == 3

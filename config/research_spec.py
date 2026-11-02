@@ -22,6 +22,7 @@ N_LAYER = 5
 class RunSpec:
     since:     int
     until:     str
+    split:     str
     fee_buy:  float
     fee_sell:  float
     slippage:  float
@@ -38,6 +39,7 @@ class RunSpec:
         return "|".join([
             f"since={self.since}",
             f"until={self.until}",
+            f"split={self.split}",
             f"fee_buy={self.fee_buy}",
             f"fee_sell={self.fee_sell}",
             f"slippage={self.slippage}",
@@ -62,12 +64,25 @@ def _yaml_mtime() -> str:
 
 def load_spec(since: int = 2016, until: str = "-", **override) -> RunSpec:
     """读一次配置并冻结成 RunSpec。override 仅供测试注入。"""
+    from config.config_manager import config
+
+    def _g(key, default):
+        v = config.get("research." + key, None)
+        return default if v is None else v
+
     vals = dict(
-        since=since, until=until,
-        fee_buy=FEE_BUY, fee_sell=FEE_SELL, slippage=SLIPPAGE, n_layers=N_LAYER,
-        trading_days=TRADING_DAYS, periods_per_year=REBALANCE_PERIOD_PER_YEAR,
-        init_cash=INIT_CASH,
-        universe="all", limit_strict=False,
+        since=_g("since", 2016 if since is None else since),
+        until=until,
+        split=_g("split", ""),
+        fee_buy=_g("fee_buy", FEE_BUY),
+        fee_sell=_g("fee_sell", FEE_SELL),
+        slippage=_g("slippage", SLIPPAGE),
+        n_layers=_g("n_layers", N_LAYER),
+        trading_days=_g("trading_days", TRADING_DAYS),
+        periods_per_year=_g("periods_per_year", REBALANCE_PERIOD_PER_YEAR),
+        init_cash=_g("init_cash", INIT_CASH),
+        universe="all",
+        limit_strict=False,
     )
     vals.update(override)
     mtime = _yaml_mtime()
