@@ -18,10 +18,13 @@ def test_main_slices_nav_before_report():
 
     i_slice = m.start()
     i_report = src.find("build_report")
-    i_sentinel = src.find("cumulative turnover < 20")
+    # 2026-11-03：哨兵从「累计换手 < 20」改成「年化换手 < 0.7」，文案改过两次。
+    # 所以锚点不再盯报错文案，改盯哨兵的【常量名】_MIN_TV_PER_YEAR ——
+    # 文案随时会调，常量是这个哨兵的身份。
+    i_sentinel = src.find("_MIN_TV_PER_YEAR")
 
     assert i_report > 0, "main.py 里找不到 build_report 调用"
-    assert i_sentinel > 0, "找不到哨兵（turnover < 20 的 raise）"
+    assert i_sentinel > 0, "找不到换手哨兵（_MIN_TV_PER_YEAR 常量）"
     assert i_sentinel < i_slice, "切片在哨兵之前 —— 坏结果会先被切片，日志会骗人"
     assert i_slice < i_report, "切片在 build_report 之后 —— 报告拿到的仍是全期 nav"
 

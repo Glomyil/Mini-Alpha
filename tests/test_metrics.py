@@ -109,18 +109,50 @@ ok_masked.loc["2021-01-29", "D"] = False
 ic_skip = MT.rank_ic(f_same, {"hfq_close": close, "can_trade": ok_masked}, pidx, min_names=4)
 check(len(ic_skip) == 1, "截面不足 min_names → 该期跳过（不算、也不报错）")
 
-print("── ⑤ 三种多空定义：各自手算，且互不相等 ──")
-navL = pd.Series([1.0, 1.1, 1.2], index=pd.date_range("2020-01-01", periods=3, freq="B"))
-navS = pd.Series([1.0, 0.95, 0.9], index=navL.index)
-ratio = MT.ls_ratio(navL, navS)
-diff = MT.ls_diff(navL, navS)
-month = MT.ls_month(navL, navS, [navL.index[0], navL.index[-1]])
-exp_diff = (0.1 + 0.05) + (1.2 / 1.1 - 0.9 / 0.95)
-check(near(ratio, 1.2 / 0.9 - 1.0, 1e-12), f"比值法 = {ratio:.4%}（手算 {1.2 / 0.9 - 1:.4%}）")
-check(near(diff, exp_diff, 1e-12), f"日差法 = {diff:.4%}（手算 {exp_diff:.4%}）")
-check(near(month, 0.3, 1e-12), f"月差法 = {month:.4%}（手算 30%（只在两端取区间收益））")
-check(abs(ratio - diff) > 1e-6 and abs(ratio - month) > 1e-6 and abs(diff - month) > 1e-6,
-      "三种定义两两不相等（防止把三种写成一个）")
+print("── ⑤ 多空：标准复利三口径（期望值全部来自恒等式/手算，不用实现重算）──")
+# 2026-11-03 T-3.4：删掉 ls_ratio / ls_diff / ls_month（比值法是净值比不是收益、
+# 算术差漏波动拖累）。新的 ls_summary 出三个口径，下面每条都用【独立来源】验证：
+#   · 多空累计 = 1.01^12 − 1        ← 复利定义，手算
+#   · n_period == periods_per_year  ⇒ 年化必须【等于】累计（年化是恒等变换）
+#   · 两层净值相同时，层差必须【恰好 0】   ← 恒等式，不依赖任何公式
+#   · t 用 [0.02, 0.00, 0.01] ⇒ mean=.01, sd=.01 ⇒ t=√3   ← 手算
+midx = pd.date_range("2020-01-31", periods=13, freq="ME")
+# 12 期：层0 全程不动，层4 每期 +1%
+nav_ok = pd.DataFrame({L: np.ones(13) for L in range(5)}, index=midx)
+nav_ok[4] = 1.01 ** np.arange(13)
+ls = MT.ls_summary(nav_ok, midx, borrow_cost=0.08, periods_per_year=12)
+exp_cum = 1.01 ** 12 - 1.0
+check(near(ls["多空累计"], exp_cum, 1e-12),
+      f"多空累计 = 1.01^12−1（手算 {exp_cum:.8f}，实测 {ls['多空累计']:.8f}）")
+check(near(ls["多空年化"], exp_cum, 1e-12),
+      "12 期 / periods_per_year=12 ⇒ 年化必须等于累计（恒等式）")
+check(near(ls["多空净年化"], exp_cum - 0.08, 1e-12),
+      f"多空净 = 年化 − borrow_cost（{exp_cum - 0.08:.8f}）")
+check(ls["期数"] == 12, f"期数 = {ls['期数']}（应 12）")
+check(ls["层差(pp)"] > 0.0, f"层4 涨、层0 平 ⇒ 层差必须 > 0（实测 {ls['层差(pp)']:.4f}）")
+
+# 恒等式：两层净值完全相同 ⇒ 层差恰好 0、多空累计恰好 0
+nav_flat = pd.DataFrame({L: np.ones(13) for L in range(5)}, index=midx)
+ls_flat = MT.ls_summary(nav_flat, midx, periods_per_year=12)
+check(abs(ls_flat["层差(pp)"]) < 1e-12, "两层净值相同 ⇒ 层差必须恰好 0")
+check(abs(ls_flat["多空累计"]) < 1e-12, "两层净值相同 ⇒ 多空累计必须恰好 0")
+
+# t 值手算：diff = [+2%, 0%, +1%] ⇒ mean=.01, sd(ddof=1)=.01, t = .01/(.01/√3) = √3
+tidx = pd.date_range("2020-01-31", periods=4, freq="ME")
+nav_t = pd.DataFrame({L: np.ones(4) for L in range(5)}, index=tidx)
+nav_t[4] = [1.0, 1.02, 1.02, 1.02 * 1.01]
+ls_t = MT.ls_summary(nav_t, tidx, periods_per_year=12)
+check(near(ls_t["多空t"], 3 ** 0.5, 1e-9),
+      f"t = √3 = {3 ** 0.5:.6f}（手算），实测 {ls_t['多空t']:.6f}")
+check(near(ls_t["多空p"], MT._norm_p(3 ** 0.5), 1e-12), "p = 正态近似(t=√3)")
+
+# A 断言（PITFALLS #23 守卫）：rdates 里混进非交易日 ⇒ reindex 出 NaN ⇒ 必须拒绝
+raised = False
+try:
+    MT._period_returns(nav_ok[4], [midx[0], pd.Timestamp("2020-02-15"), midx[1]])
+except AssertionError:
+    raised = True
+check(raised, "_period_returns：rdates 含非交易日 ⇒ 断言拒绝（PITFALLS #23 守卫）")
 
 print("── ⑥ nav 含 NaN → 报错，不许静默 dropna ──")
 nav_bad = navA.copy()
@@ -139,19 +171,29 @@ except ValueError:
 check(raised, "layer_table(nav 含 NaN) → ValueError")
 
 print("── ⑦ layer_table / ls_summary ──")
-nav_df = pd.DataFrame({0: navS, 4: navL})          # 层 0 = 空头、层 4 = 多头
+# 层 0 = 空头（1.0 → 0.9）、层 4 = 多头（1.0 → 1.2）
+_navS = pd.Series([1.0, 0.95, 0.9], index=pd.date_range("2020-01-01", periods=3, freq="B"))
+_navL = pd.Series([1.0, 1.1, 1.2], index=_navS.index)
+nav_df = pd.DataFrame({0: _navS, 4: _navL})
 tab = MT.layer_table(nav_df)
 check(list(tab.index) == [0, 4] and {"期末净值", "年化", "波动", "最大回撤", "夏普"} <= set(tab.columns),
       f"layer_table：每层一行、指标齐全（{list(tab.columns)}）")
 check(near(float(tab.loc[0, "期末净值"]), 0.9, 1e-12) and near(float(tab.loc[4, "期末净值"]), 1.2, 1e-12),
       "layer_table 的期末净值与输入一致")
-check(near(float(tab.loc[4, "最大回撤"]), MT.max_drawdown(navL), 1e-12)
-      and near(float(tab.loc[0, "年化"]), MT.ann_return(navS), 1e-12),
+check(near(float(tab.loc[4, "最大回撤"]), MT.max_drawdown(_navL), 1e-12)
+      and near(float(tab.loc[0, "年化"]), MT.ann_return(_navS), 1e-12),
       "layer_table 的值与单指标函数一致")
-lsv = MT.ls_summary(nav_df, [navL.index[0], navL.index[-1]])
-check(set(lsv) == {"比值法", "日差法", "月差法"} and near(lsv["比值法"], 1.2 / 0.9 - 1.0, 1e-12)
-      and near(lsv["月差法"], 0.3, 1e-12),
-      "ls_summary：三种定义齐全，默认最后一列=多头 / 第一列=空头")
+
+# ls_summary 的键集合变了（比值法/日差法/月差法 → 三口径 + t/p + 期数）
+lsv = MT.ls_summary(nav_df, [_navL.index[0], _navL.index[-1]])
+check(set(lsv) == {"层差(pp)", "多空年化", "多空累计", "多空净年化", "多空t", "多空p", "期数"},
+      f"ls_summary 的键：{sorted(lsv)}")
+# 手算：只取首尾两点 ⇒ 多头 +20%、空头 −10% ⇒ 每期差 = 0.2 − (−0.1) = 0.3
+check(near(lsv["多空累计"], 0.30, 1e-12),
+      f"多空累计 = 0.2 − (−0.1) = 30%（实测 {lsv['多空累计']:.6%}）")
+check(lsv["期数"] == 1, f"只取首尾两点 ⇒ 1 期（实测 {lsv['期数']}）")
+check(lsv["层差(pp)"] > 0, "多头涨、空头跌 ⇒ 层差必须 > 0")
+check("比值法" not in lsv, "比值法必须已删除（它是净值比不是收益）")
 
 print("\n" + "=" * 46)
 print('\n── ⑧ 被白吃的 alpha（T-2.4）：被挡的单子错过了多少 ──')
@@ -168,12 +210,12 @@ def _fake_res(buy, sell, nav=1.0):
 _FLAT = {"hfq_close": pd.DataFrame([[10.0], [11.0]], index=_EX, columns=["A"]),
          "hfq_open": pd.DataFrame([[10.0], [11.0]], index=_EX, columns=["A"])}
 
-pp = MT._blocked_pp(_fake_res([[0.05], [0.0]], [[0.0], [0.0]]), _FLAT)
+pp = MT._blocked_pp(_fake_res([[0.05], [0.0]], [[0.0], [0.0]]), _FLAT, periods_per_year=12)
 exp = 0.05 * 10 * 0.10 / 1.0 / 2 * 12 * 100     # 每期损失率 → 平均 → 年化 → %
 check(near(pp, exp, 1e-9), f"涨停挡掉 + 下期涨 10% ⇒ {pp:.6f}（手算 {exp:.6f}）")
 check(pp > 0.0, "少赚了 ⇒ 必须是正数")
 
-pp0 = MT._blocked_pp(_fake_res([[0.0], [0.0]], [[0.0], [0.0]]), _FLAT)
+pp0 = MT._blocked_pp(_fake_res([[0.0], [0.0]], [[0.0], [0.0]]), _FLAT, periods_per_year=12)
 check(abs(pp0) < 1e-12, f"什么都没挡 ⇒ 必须恰好 0（实际 {pp0:.3e}）")
 
 check(passed + failed >= 20, f"断言条数守卫：{passed + failed} 条")

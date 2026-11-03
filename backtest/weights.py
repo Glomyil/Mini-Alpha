@@ -75,7 +75,7 @@ def main():
     t0 = time.time()
     panels = load_panels()
     rdates = [d for d in rebalance_dates(
-        panels["hfq_close"].index) if d.year >= 2016]
+        panels["hfq_close"].index, rule="ME") if d.year >= 2016]
     W, layers = weights_for_factor("rev_20d", panels, rdates)
     print(
         f"面板 {panels['hfq_close'].shape} ｜ 调仓日 {len(rdates)} 个 ｜ 因子 rev_20d（已定向）｜ 分 {len(W)} 层 ｜ 用时 {time.time() - t0:.1f}s")

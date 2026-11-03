@@ -246,11 +246,13 @@ def main():
     from backtest.panel import load_panels
     from backtest.assemble import rebalance_dates
     from backtest.weights import weights_for_factor
+    # 演示脚本也走 metrics 的同一套年化/多空，别再自己写一份 244 和比值法
+    from backtest import metrics as MT
 
     t0 = time.time()
     panels = load_panels()
     rdates = [d for d in rebalance_dates(
-        panels["hfq_close"].index) if d.year >= 2016]
+        panels["hfq_close"].index, rule="ME") if d.year >= 2016]
     W, layers = weights_for_factor("rev_20d", panels, rdates)
     res = run_all_layers(W, panels, rdates)
     # 【二维】5 列净值表（列名 = 层号）；单层是 res[L]["nav"]【一维】
@@ -258,18 +260,20 @@ def main():
     print(
         f"面板 {panels['hfq_close'].shape} ｜ 调仓日 {len(rdates)} ｜ 5 层 ｜ 用时 {time.time() - t0:.1f}s")
     print()
-    print(f"{'层':<4}{'期末净值':>12}{'年化':>10}{'最大回撤':>12}{'累计换手':>12}{'费用合计':>12}")
+    print(f"{'层':<4}{'期末净值':>12}{'年化':>10}{'最大回撤':>12}{'累计换手':>12}{'佣金合计':>12}")
     for L, r in enumerate(res):
         n = r["nav"].dropna()
-        ann = n.iloc[-1] ** (244 / len(n)) - 1
+        ann = MT.ann_return(n)          # 不再写死 244
         dd = float((n / n.cummax() - 1).min())
         print(
             f"{L:<4}{n.iloc[-1]:>12.4f}{ann:>10.2%}{dd:>12.2%}{r['turnover'].sum():>12.2f}{r['fees'].sum():>12.5f}")
-    ls = nav_df[4] / nav_df[0] - 1
+    _ls = MT.ls_summary(nav_df, rdates)      # 演示也用它 —— 别再打印废弃的比值法
     print()
-    print(
-        f"多空（比值法：层4 / 层0）= {ls.iloc[-1]:.2%} ｜ 年化 {(1 + ls.iloc[-1]) ** (244 / len(ls)) - 1:.2%}")
-    print("注意：含佣金 + 印花税 + 5bp 滑点；无融券费 / 无整手 / 无涨跌停；换手是一侧口径 0.5×Σ|Δw|")
+    print(f"层差 {_ls['层差(pp)'] * 100:+.2f} pp ｜ 多空零成本 {_ls['多空年化']:+.2%} "
+          f"｜ 多空净 {_ls['多空净年化']:+.2%}（扣 8% 融券）"
+          f" ｜ t = {_ls['多空t']:+.2f}  p = {_ls['多空p']:.3g}")
+    print("注意：含佣金 + 印花税 + 滑点（滑点在成交价里，不进「佣金合计」列）；"
+          "无整手 / 无涨跌停；换手是一侧口径 0.5×Σ|Δw|")
 
 
 if __name__ == "__main__":

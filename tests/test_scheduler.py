@@ -94,7 +94,10 @@ check(sorted(panels) == ["amount", "can_trade", "hfq_close", "hfq_open", "reason
 # 2026-11-01 增量更新到 2026-10-29（+32 个交易日 + 补 63 只清单遗漏的票）
 check(panels["hfq_close"].shape == (2871, 5476), f"面板形状 {panels['hfq_close'].shape}")
 
-rdates = [d for d in rebalance_dates(panels["hfq_close"].index) if d.year >= SINCE]
+# 2026-11-03：rebalance_dates 的 rule 改成必传（PITFALLS #19：默认值藏口径）。
+# 这里显式写 "ME"，和下面 check(len(rdates) == 130) 的期望值配套。
+rdates = [d for d in rebalance_dates(panels["hfq_close"].index, rule="ME")
+          if d.year >= SINCE]
 # 2026-11-01 数据更新后多了 2026-10-29 那一期（129 → 130）
 check(len(rdates) == 130, f"调仓日 {len(rdates)} 个（期望 130）")
 check(all(d.year >= SINCE for d in rdates), "全部 ≥ 2016（含 2016 本身，不是 >）")

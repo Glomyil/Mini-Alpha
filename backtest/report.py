@@ -41,8 +41,8 @@ def banner(meta: dict) -> str:
         f"> - 因子：`{meta['factor']}` ｜ 区间：{meta['start']} ~ {meta['end']} ｜ 调仓：月频（{meta['n_rdate']} 期）",
         f"> - 净值口径：**{meta['val_basis']}**（收盘 / 开盘两套，另一套作诊断）｜ 成交：**T+1 开盘**（缺价即不成交）",
         f"> - 年化常数：**{meta['trading_days']}** 交易日/年（A 股；252 是美股）｜ IC-IR 用 {meta['periods_per_year']} 期/年",
-        f"> - 成本：佣金 {meta['fee_buy']}/{meta['fee_sell']} ｜ 滑点 {meta['slippage']}（单边）｜ 无融券费 / 无整手",
-        f"> - 多空：比值法（主）· 日差法 · 月差法 —— 结论以**比值法**为准",
+        f"> - 成本：佣金 {meta['fee_buy']}/{meta['fee_sell']} ｜ 滑点 {meta['slippage']}（单边）｜ 无整手",
+        f"> - 多空：**标准复利 ∏(1+r₄−r₀)**（主）· 层差 pp · 扣融券净额 —— 多空是**纯度诊断**，不是可执行策略",
         f"> - 生成时间：{meta['stamp']}",
     ])
 
@@ -71,11 +71,13 @@ def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲�
     ax.get_yaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
     ax.set_ylabel("净值（对数轴，起点 = 1.0）")
 
-    ls = nav_df[nav_df.columns[-1]] / nav_df[nav_df.columns[0]]
+    # 副轴画的是【层4 净值 ÷ 层0 净值】—— 它是"相对强弱"，不是多空收益。
+    # 原图例写"多空(比值法)"会让人以为这是多空组合的钱，改回它本来的名字。
+    ratio = nav_df[nav_df.columns[-1]] / nav_df[nav_df.columns[0]]
     ax2 = ax.twinx()
-    ax2.plot(nav_df.index, ls.to_numpy(), lw=1.2, ls="--", color="#c0392b",
-             alpha=0.55, label="多空(比值法)")
-    ax2.set_ylabel("多空比值", fontsize=8, color="#c0392b")
+    ax2.plot(nav_df.index, ratio.to_numpy(), lw=1.2, ls="--", color="#c0392b",
+             alpha=0.55, label="层4÷层0 净值比（非多空收益）")
+    ax2.set_ylabel("层4÷层0 净值比", fontsize=8, color="#c0392b")
     ax2.tick_params(labelsize=7, colors="#c0392b")
 
     h1, l1 = ax.get_legend_handles_labels()
@@ -93,8 +95,11 @@ def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲�
 
 def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Path = OUT,
                  val_basis: str = "close", note: str = "", factor_val=None,
-                 split: str = "") -> dict:
-    layer_tab = MT.layer_table(nav_df, res, rf=rf)
+                 split: str = "", spec=None) -> dict:
+    # ★ trading_days 是唯一源头：报告表头、年化、波动、夏普、层差全用它。
+    #   不传的话 metrics 会退回自己的 244 常量 ⇒ 表头印 252 但数字按 244 算（PITFALLS #19）。
+    _td = spec.trading_days if spec else MT.TRADING_DAYS
+    layer_tab = MT.layer_table(nav_df, res, rf=rf, trading_days=_td)
 
     # ── T-3.1 基准线：全 A 等权（每日再平衡、未扣费，基准偏高 => 超额偏保守）──
     _bench = None
@@ -103,14 +108,18 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
         # 归一化到 1.0：它从 2015 年累乘起，直接叠到 2016 起的 nav 上会从 1.6 开始。
         # 年化不受影响（ann_return 是相对算的），但图上起点不一致等于骗人 ✗
         _bench = _bench / float(_bench.iloc[0])
-        _bann = MT.ann_return(_bench)
+        _bann = MT.ann_return(_bench, _td)
         layer_tab["基准年化"] = _bann
         layer_tab["超额"] = layer_tab["年化"] - _bann
     else:
         layer_tab["基准年化"] = "缺基准数据"
         layer_tab["超额"] = "缺基准数据"
 
-    ls = MT.ls_summary(nav_df, rdates)
+    # freq 是唯一源头：年化粒度用 spec 的 periods_per_year，不写死 12
+    _bc = spec.borrow_cost if spec else 0.08
+    _ppy = spec.periods_per_year if spec else MT.REBALANCE_PERIODS_PER_YEAR
+    ls = MT.ls_summary(nav_df, rdates, borrow_cost=_bc, periods_per_year=_ppy,
+                       trading_days=_td)
 
     ic = ic_sum = None
     if panels is not None and factor is not None:
@@ -118,9 +127,13 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
         if factor_val is None:
             from backtest.assemble import build_features
             from backtest.factors import FACTORS
-            spec = FACTORS[factor]
-            factor_val = spec["fn"](build_features(
-                panels, [factor]), {}) * spec["sign"]
+            # ⚠️ 变量名不能叫 spec —— 那是本函数的形参（RunSpec 或 None），
+            #    覆盖之后下面 meta 里的 spec.trading_days 就会 AttributeError。
+            #    只在 factor_val=None 的旧路径（test_scheduler / metrics.main）发作，
+            #    main.py 永远传 factor_val ⇒ 之前完全隐身。
+            _fspec = FACTORS[factor]
+            factor_val = _fspec["fn"](build_features(
+                panels, [factor]), {}) * _fspec["sign"]
         ic = MT.rank_ic(factor_val, panels, rdates)
         ic_sum = MT.ic_summary(ic)
     stamp = pd.Timestamp.today().strftime(
@@ -133,10 +146,16 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             if _p.exists():
                 shutil.copy2(_p, _p.with_name(_p.stem + "_prev" + _p.suffix))
     nav_plot(nav_df, png, title=f"{factor} 分层净值", bench=_bench)
+
     meta = {"factor": factor, "start": nav_df.index[0].date(), "end": nav_df.index[-1].date(),
-            "n_rdate": len(rdates), "trading_days": MT.TRADING_DAYS,
-            "periods_per_year": MT.REBALANCE_PERIODS_PER_YEAR, "val_basis": val_basis,
-            "fee_buy": 0.00025, "fee_sell": 0.00075, "slippage": 0.0005, "stamp": stamp}
+            "n_rdate": len(rdates),
+            "trading_days": spec.trading_days if spec else MT.TRADING_DAYS,
+            "periods_per_year": spec.periods_per_year if spec else MT.REBALANCE_PERIODS_PER_YEAR,
+            "val_basis": val_basis,
+            "fee_buy": spec.fee_buy if spec else 0.00025,
+            "fee_sell": spec.fee_sell if spec else 0.00075,
+            "slippage": spec.slippage if spec else 0.0005,
+            "stamp": stamp}
 
     parts = [f"# 因子回测报告 · `{factor}`", "", banner(meta), ""]
 
@@ -156,7 +175,8 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
         n_ld = int(((bs > 0) & (r == 3)).to_numpy().sum()
                    ) if r is not None else 0
 
-        pp = MT._blocked_pp(_top, panels)
+        # 每期损失 × 每年期数 = 年化；期数由 freq 决定，不能写死 12
+        pp = MT._blocked_pp(_top, panels, periods_per_year=_ppy)
         parts += [
             "## 0. 成交失败（P2 核心结论）", "",
             f"- 目标买入里，**{n_lu} 笔撞上涨停**没买成（共 {n_ex} 期）",
@@ -166,12 +186,14 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             "",
         ]
 
-    parts += ["## 1. 分层指标", "", md_table(layer_tab), ""]
+    parts += ["## 1. 分层指标", "", md_table(layer_tab), "",
+              "*「佣金合计」只含佣金与印花税。**滑点不进这一列** —— 它在成交价里"
+              "（买入多付、卖出少收），已经体现在净值和年化上。*", ""]
 
     # ── T-3.3 §2 分段对比：split 为空则整节跳过（空转也留痕，PITFALLS 1096）──
     seg = None
     if split:
-        seg = segment_table(nav_df, split, bench=_bench)
+        seg = segment_table(nav_df, split, bench=_bench, trading_days=_td)
         if len(seg) == 0:
             logger.warning(f"{factor} 分段表为空：split={split!r} 未产生任何段")
         else:
@@ -196,16 +218,42 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
         parts += ["## 4. IC（标签 = 下一个调仓日的区间收益）", "",
                   f"- IC 均值 **{ic_sum['ic_mean']:.4f}** ｜ 标准差 {ic_sum['ic_std']:.4f} "
                   f"｜ **IC-IR {ic_sum['ic_ir']:.4f}** ｜ 期数 {ic_sum['n']}", ""]
-    parts += ["## 5. 多空（三种定义）", "",
-              "| 定义 | 累计 |", "| :-- | --: |"] + \
-        [f"| {k} | {v:.2%} |" for k, v in ls.items()] + [""]
+    # ── §5 多空诊断（2026-11-03 重写：删比值法/日差法/月差法，改标准复利 + t/p）──
+    _t, _p = ls["多空t"], ls["多空p"]
+    _t_txt = "nan" if _t != _t else f"{_t:+.2f}"          # x != x 是 nan 的判据
+    _p_txt = "nan" if _p != _p else f"{_p:.3g}"
+    parts += ["## 5. 多空诊断（不可直接交易）", "",
+              "> 多空不是交易策略 —— A 股个股做空基本不可行（券源少、费率高、很多票没券）。",
+              "> 它是「因子纯度的体温计」：剥离市场 beta 之后还剩多少 alpha。",
+              "> **你能实际赚的是「多头超额」，见 §1 的「超额」列和 §6 第一条。**", "",
+              "| 口径 | 年化 | 累计 | 假设 |",
+              "| :-- | --: | --: | :-- |",
+              # ⚠️ 层差的单位是【百分点】不是百分比：0.1489 要印成 "+14.89 pp"，
+              #   不能印成 "+14.89%"（那会被读成"涨了 14.89%"）。这正是本票在治的口径误读。
+              f"| 层差（pp） | {ls['层差(pp)'] * 100:+.2f} pp | — | 两个独立多头组合，不做空 |",
+              f"| 多空（零成本） | {ls['多空年化']:+.2%} | {ls['多空累计']:+.2%} "
+              f"| 每期再平衡、零成本做空、券源无限 |",
+              f"| **多空净** | **{ls['多空净年化']:+.2%}** | — "
+              f"| 扣 {_bc:.0%}/年融券费 |",
+              "",
+              f"> 配对 t = **{_t_txt}** ｜ p = **{_p_txt}**"
+              f"（n = {ls['期数']} 期，df = {ls['期数'] - 1}，p 用正态近似）",
+              "> 「层差」是两个年化率相减（pp），**不存在累计口径**，所以那格写「—」。", ""]
     # 零依赖版 Spearman（pandas 那个要 scipy，requirements 里没有 ✗）
     mono = MT.spearman_rank(
         layer_tab["年化"].tolist(), list(range(len(layer_tab))))
     mono_txt = "nan" if mono is None else f"{mono:.3f}"
+    # ★ 第一句放「你能实际赚的」—— 多空是诊断，超额才是钱
+    _ex = layer_tab["超额"].iloc[-1] if "超额" in layer_tab else None
+    _ex_txt = f"{_ex:+.2%}" if isinstance(_ex, float) and _ex == _ex else "缺基准数据"
+    _hi = layer_tab["年化"].idxmax()
     parts += ["## 6. 结论（机械生成，不掺主观）", "",
+              f"- **可交易：层 {_hi} 相对全 A 等权超额 {_ex_txt}**"
+              f"（只做多是 A 股唯一能做的方向）",
+              f"- 多空净年化 {ls['多空净年化']:+.2%}（扣 {_bc:.0%} 融券后）"
+              f"—— 用于判断 alpha 纯不纯，不是可执行策略",
               f"- 层号 vs 年化的 Spearman = **{mono_txt}**（越接近 1 越单调；< 0 说明高分位反而差）",
-              f"- 最高层：层 {layer_tab['年化'].idxmax()}（年化 {layer_tab['年化'].max():.2%}）",
+              f"- 最高层：层 {_hi}（年化 {layer_tab['年化'].max():.2%}）",
               f"- 最低层：层 {layer_tab['年化'].idxmin()}（年化 {layer_tab['年化'].min():.2%}）", ""]
     if note:
         parts += ["## 7. 备注", "", note, ""]
@@ -225,7 +273,7 @@ def main():
 
     panels = load_panels()
     rdates = [d for d in rebalance_dates(
-        panels["hfq_close"].index) if d.year >= 2016]
+        panels["hfq_close"].index, rule="ME") if d.year >= 2016]
     W, layers = weights_for_factor("rev_20d", panels, rdates)
     res = run_all_layers(W, panels, rdates)
     out = build_report("rev_20d", nav_frame(res), panels, rdates, res)
@@ -234,11 +282,18 @@ def main():
     print(out["layer_tab"].round(4).to_string())
 
 
-def segment_table(nav_df, splits, *, bench=None, layers=(0, 4)):
+def segment_table(nav_df, splits, *, bench=None, layers=None,
+                  trading_days: int = MT.TRADING_DAYS):
     splits = [s.strip() for s in str(splits).split(",") if s.strip()]
     idx = nav_df.index
     if not splits:
         return pd.DataFrame()          # 不分段 ⇒ 空表，调用方据此跳过整节
+
+    # ★ layers 默认取【首层 + 末层】而不是写死 (0, 4)：
+    #   n_layers 参数化之后，10 层时的「层4」是【中间层】，写死会把中间层当顶层用，
+    #   于是同一份报告里 §2 的「顶层」和 §1/§5/§6 的「顶层」不是同一层。
+    if layers is None:
+        layers = (nav_df.columns[0], nav_df.columns[-1])
 
     # 边界对齐：split 必须落在 idx 上，落在两期之间取前一期
     cuts = []
@@ -263,11 +318,12 @@ def segment_table(nav_df, splits, *, bench=None, layers=(0, 4)):
         for L in layers:
             s = seg[L]
             norm = s / s.iloc[0]        # ★ 例外③：段内归一化
-            row[f"层{L}年化"] = MT.ann_return(norm)       # ★ 例外①：独立算
+            row[f"层{L}年化"] = MT.ann_return(norm, trading_days)   # ★ 独立算
             if bench is not None:
                 bs = bench.loc[a:b]
-                bn = bs / bs.iloc[0]    # ★ 例外②：基准也归一化
-                row[f"层{L}超额"] = MT.ann_return(norm) - MT.ann_return(bn)
+                bn = bs / bs.iloc[0]    # ★ 基准也归一化
+                row[f"层{L}超额"] = (MT.ann_return(norm, trading_days)
+                                  - MT.ann_return(bn, trading_days))
         rows.append(row)
     return pd.DataFrame(rows)
 

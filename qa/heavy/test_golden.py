@@ -44,7 +44,9 @@ def _nav_for(factor):
     from backtest.engine import run_all_layers, nav_frame
 
     panels = load_panels()
-    rdates = [d for d in rebalance_dates(panels["hfq_close"].index) if d.year >= 2016]
+    # rule 必传；用 "ME" —— 下面的 golden 数字（130 期 / 13.44%）就是月频口径
+    rdates = [d for d in rebalance_dates(panels["hfq_close"].index, rule="ME")
+              if d.year >= 2016]
     spec = FACTORS[factor]
     fval = spec["fn"](build_features(panels, [factor]), {}) * spec["sign"]
     W, _ = build_target_weights(fval, rdates, panels["can_trade"])

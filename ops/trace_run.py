@@ -85,7 +85,7 @@ show("因子值 手算", tbl.iloc[i][CODE] * spec["sign"], val.iloc[i][CODE], 1e
 print()
 
 # ── ⑤ 权重：名次 → 层号 → 层内等权 ─────────────────────────────────────────
-rd = [x for x in rebalance_dates(days) if x.year >= 2016]
+rd = [x for x in rebalance_dates(days, rule="ME") if x.year >= 2016]
 W, L = weights_for_factor(FAC, P, rd)
 v = val.loc[DT]
 okmask = P["can_trade"].loc[DT].eq(True) & v.notna()

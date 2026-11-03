@@ -16,6 +16,8 @@
 
 from config.config_manager import config
 import hashlib
+
+import numpy as np
 from pathlib import Path
 from backtest.panel import load_panels
 from backtest.assemble import build_features, rebalance_dates
@@ -64,7 +66,7 @@ def main():
     logger.info(f"RUN 区间:{spec.since}+ 因子:{len(FACTORS)} panel:{_fp} "
                 f"shape:{panels['hfq_close'].shape}")
     rdates = [d for d in rebalance_dates(
-        panels["hfq_close"].index) if d.year >= spec.since]
+        panels["hfq_close"].index, rule=spec.freq) if d.year >= spec.since]
 
     logger.info(f"RUN SINCE:{spec.since} 首个调仓日:{rdates[0].date()} 调仓:{len(rdates)}期 "
                 f"因子:{len(FACTORS)} panel:{_fp} shape:{panels['hfq_close'].shape}")
@@ -78,14 +80,52 @@ def main():
             continue
         _spec = FACTORS[name]
         _fval = _spec["fn"](build_features(panels, [name]), {}) * _spec["sign"]
-        W, _ = build_target_weights(_fval, rdates, panels["can_trade"])
-        res = run_all_layers(W, panels, rdates)
-        # —— 哨兵（2026-10-13）：结果落在合理区间才放行 ——
-        # 依据：6 个因子 × 5 层的实测累计换手都在 44~103；若某层 < 20，多半是"买不进任何票"
-        low = [L for L in range(len(res)) if float(
-            res[L]["turnover"].sum()) < 20.0]
+        W, _ = build_target_weights(
+            _fval, rdates, panels["can_trade"], n_layers=spec.n_layers)
+        res = run_all_layers(W, panels, rdates,
+                             fee_buy=spec.fee_buy, fee_sell=spec.fee_sell,
+                             slippage=spec.slippage, init_cash=spec.init_cash)
+
+        # —— 哨兵（2026-10-13 建，2026-11-03 改）：换手塌陷才拒绝出报告 ——
+        # 第三代判据：【年化换手】= 累计换手 ÷ 年数。为什么换了两次：
+        #   第一代「累计 < 20」：随期数线性变，since=2020（81 期）时层0 只有 15.83 误报
+        #   第二代「每期平均 < 15%」：随【频率】剧烈变，而且【不单调】——
+        #       实测 amihud：ME 19.5% / QE 27.2% / W-FRI 8.0%
+        #       （季度调仓让排名漂得更久 ⇒ 每期换手反而比月频高；周频最低）
+        #       ⇒ 任何「每期 × 频率系数」的公式都套不上 ✗
+        #   第三代「年化换手」：跨频率可比。实测 12 组（2 因子 × 3 频率 × 层0/层4）
+        #       法定范围 1.090 ~ 8.958；#23 的损坏样本（累计 5 / 10.8 年）是 0.462
+        #       ⇒ 取 0.7，两边各留 1.5 倍余量。
+        _MIN_TV_PER_YEAR = 0.7
+        _n_period = max(len(res[0]["turnover"]), 1)
+        _years = _n_period / max(spec.periods_per_year, 1)
+        _ann_tv = {L: float(res[L]["turnover"].sum()) / _years
+                   for L in range(len(res))}
+        # 窗口不足一年时年化换手没有统计意义（一次调仓就能算出 0.3），跳过不判
+        low = [L for L, v in _ann_tv.items()
+               if v < _MIN_TV_PER_YEAR] if _years >= 1.0 else []
         if low:
             try:
+                # ── 2026-11-03：失败时把【上游指纹】全部 dump 出来 ──
+                # 目的：下一次偶发时，能直接对比「失败这次」和「成功那次」的 md5，
+                # 定位到底是 can_trade / fv / W / 引擎 哪一层先变的。
+                # 只加日志，不改任何计算。
+                def _m(x):
+                    return hashlib.md5(np.ascontiguousarray(x).tobytes()).hexdigest()[:10]
+                _ct = panels["can_trade"].to_numpy()
+                logger.warning(
+                    f"DIAG panel  can_trade md5 {_m(_ct)} true_ratio {_ct.mean():.6f} "
+                    f"hfq_close md5 {_m(panels['hfq_close'].to_numpy())}")
+                _fvv = _fval.to_numpy()
+                logger.warning(
+                    f"DIAG fv     md5 {_m(_fvv)} shape {_fvv.shape} "
+                    f"nonnan {int(np.isfinite(_fvv).sum())} "
+                    f"min {np.nanmin(_fvv):.6g} max {np.nanmax(_fvv):.6g}")
+                for _L in range(len(W)):
+                    _w = W[_L].to_numpy()
+                    logger.warning(
+                        f"DIAG W{_L}     md5 {_m(_w)} nnz {int((_w != 0).sum())} "
+                        f"rowsum_min {float(_w.sum(axis=1).min()):.6f}")
                 _W0 = W[0].to_numpy(dtype="float64")
                 _rs = _W0.sum(axis=1)
                 logger.warning(
@@ -99,9 +139,12 @@ def main():
                                    f"nav_end {float(res[_L]['nav'].iloc[-1]):.6f}")
             except Exception as _e:
                 logger.warning(f"DIAG failed: {_e}")
+            _detail = "，".join(f"层{L}={_ann_tv[L]:.2f}/年" for L in low)
             raise AssertionError(
-                f"layer {low} cumulative turnover < 20 -- result untrusted "
-                f"(possible nondeterministic data corruption, PITFALLS #23); refusing to report")
+                f"年化换手异常低：{_detail}（阈值 {_MIN_TV_PER_YEAR:.1f}/年，"
+                f"共 {_n_period} 期 ≈ {_years:.2f} 年，freq={spec.freq}）"
+                f"-- result untrusted (possible nondeterministic data corruption, "
+                f"PITFALLS #23); refusing to report")
         _nav_full = nav_frame(res)
         _nav = _nav_full.loc[rdates[0]:]  # ★ 唯一的新增：首个成交日之前的空仓期不进指标
         logger.info(f"nav 切片 {_nav_full.index[0].date()}~{_nav_full.index[-1].date()} "
@@ -109,11 +152,11 @@ def main():
                     f"行数 {len(_nav_full)}→{len(_nav)} (drops {len(_nav_full) - len(_nav)})")
 
         out = RP.build_report(name, _nav, panels, rdates,
-                              res, outdir=OUT, factor_val=_fval, split=spec.split)
+                              res, outdir=OUT, factor_val=_fval, split=spec.split, spec=spec)
 
         tv = [float(res[k]["turnover"].sum()) for k in range(len(res))]
         logger.info(f"{name} | 区间 {_nav.index[0].date()} | 层0换手 {tv[0]:.4f} "
-                    f"| 层4换手 {tv[-1]:.4f} | 多空 {out['ls']['比值法']:.4f} "
+                    f"| 层4换手 {tv[-1]:.4f} | 多空净 {out['ls']['多空净年化']:.4f} "
                     f"| IC {out['ic_summary']['ic_mean']:.4f} "
                     f"| ICvalid {out['ic_summary']['n']} ICbad {out['ic_summary']['n_bad']}")
 

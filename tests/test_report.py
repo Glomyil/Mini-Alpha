@@ -69,7 +69,9 @@ meta = {"factor": "rev_20d", "start": idx[0].date(), "end": idx[-1].date(), "n_r
         "trading_days": 244, "periods_per_year": 12, "val_basis": "close",
         "fee_buy": 0.00025, "fee_sell": 0.00075, "slippage": 0.0005, "stamp": "20261012"}
 bn = RP.banner(meta)
-for token in ("244", "月频", "T+1 开盘", "close", "比值法", "日差法", "月差法", "滑点"):
+# 2026-11-03：多空口径改了（比值法/日差法/月差法 → 标准复利 + 层差 pp + 扣融券净额）。
+# 这里换成新口径的稳定标记 —— 不再断言已删除的三种旧算法名。
+for token in ("244", "月频", "T+1 开盘", "close", "滑点", "标准复利", "纯度诊断"):
     check(token in bn, f"口径声明含「{token}」")
 check("收盘估值" not in bn, "口径声明不再硬编码「收盘估值」（改为读 meta['val_basis']）")
 
@@ -86,7 +88,10 @@ for L in nav_df.columns:
     check(f"{v:.4f}" in text, f"层 {L} 期末净值 {v:.4f} 出现在报告里")
 v_ann = out["layer_tab"].loc[2, "年化"]
 check(f"{v_ann:.2%}" in text, f"年化按百分比渲染（{v_ann:.2%}）")
-check(f"{out['ls']['比值法']:.2%}" in text, f"多空·比值法 {out['ls']['比值法']:.2%} 出现在报告里")
+v_cum = out["ls"]["多空累计"]
+# §5 的表格里累计那格用 :+.2% 渲染（带正负号），所以这里也跟着带号
+check(f"{v_cum:+.2%}" in text, f"多空累计 {v_cum:+.2%} 出现在报告里")
+check("比值法" not in text, "报告里不该再出现「比值法」（T-3.4 删掉的误导口径）")
 
 print("── ⑤ 可复现：同一输入跑两次 → 文本逐字节相同 ──")
 out2 = RP.build_report("rev_20d", nav_df, None, rdates, None, outdir=TMP)

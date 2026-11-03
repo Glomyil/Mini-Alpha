@@ -2101,3 +2101,252 @@ python main.py
     #23 偶发非确定性   → 那条是"同一个输入跑出不同结果"，这条是"根本跑不起来"
     #26 冗余不校验     → 那条防"两份不一致"，这条防"一份写了但没接上"
     #19 默认值藏口径   → 那条说"隐性默认值会分叉"，这条说"显性参数也会断链"
+
+
+---
+
+## #29 【死信箱】参数读进来了，但没人送出去 —— 而默认值恰好相同，所以它隐身
+
+**发现日期**：2026-11-02（T-3.4 规划时，用户自己提出「yml 的参数貌似没被使用」）
+**发现方式**：**用户看代码时怀疑**，不是任何测试或审查抓到的
+
+### 现象
+
+`application.yml` 的 `research` 节有 9 个参数，**只有 2 个真生效**：
+
+| 参数 | 生效 | 断在哪 |
+|---|:-:|---|
+| `since` | ✅ | — |
+| `split` | ✅ | — |
+| `fee_buy` | ❌ | `main.py` 调 `run_all_layers` 时没传 |
+| `fee_sell` | ❌ | 同上 |
+| `slippage` | ❌ | 同上 |
+| `n_layers` | ❌ | `build_target_weights` 调用没传 |
+| `trading_days` | ❌ | `report.py` 的 meta 用 `MT.TRADING_DAYS` |
+| `periods_per_year` | ❌ | 同上 |
+| `init_cash` | ❌ | `run_all_layers` 调用没传 |
+
+### 代码长什么样
+
+```python
+# engine.py:57 —— 函数【有】这些参数，但都带默认值
+def run_layer(W_layer, panels, rdates, *,
+              fee_buy=0.00025, fee_sell=0.00075, slippage=0.0005, init_cash=1.0):
+
+# weights.py:10
+def build_target_weights(factor, rdates, can_trade, n_layers=5):
+
+# main.py:81-82 —— 调用时【一个都没传】 ⇒ 全部走默认值
+W, _ = build_target_weights(_fval, rdates, panels["can_trade"])
+res  = run_all_layers(W, panels, rdates)
+
+# report.py:137-139 —— meta 里干脆是【字面量】
+"trading_days": MT.TRADING_DAYS,
+"fee_buy": 0.00025, "fee_sell": 0.00075, "slippage": 0.0005,
+```
+
+⇒ ⇒ 报告表头**永远**打印 `0.00025 / 0.00075 / 0.0005`，不管你 yml 写什么 ✓
+
+### 为什么它活了很久，一直没人发现
+
+> **★ yml 的值和代码默认值【恰好相同】**
+
+```
+yml:  fee_buy: 0.00025     代码默认: fee_buy=0.00025   ⇒ 一样
+yml:  slippage: 0.0005     代码默认: slippage=0.0005   ⇒ 一样
+yml:  n_layers: 5          代码默认: n_layers=5        ⇒ 一样
+```
+
+⇒ ⇒ **改不改 yml，结果都一样 ⇒ 看起来完全正常** ✓
+⇒ ⇒ ⇒ **只有【真的改一个值】才会暴露** —— 而从来没人改过 ✓✓
+
+### 检测方法（按成本排）
+
+```powershell
+# ① 最直接：改一个值，看结果变不变
+notepad config\application.yml      # slippage: 0.0005 → 0.002
+python main.py
+Select-String -Path reports\report_amihud_20d_close.md -Pattern '滑点'
+#   ⇒ 如果表头还是 0.0005 ⇒ 【死信箱】**✗
+
+# ② grep 参数名，看它有没有被「传下去」
+grep -rn "fee_buy\|slippage" main.py backtest/report.py
+
+# ③ 最可靠：链路测试（造 spec(slippage=0.002) ⇒ 跑完 ⇒ 断言表头和费用都变）
+```
+
+### 和 #28 的区别（**不是重复**）
+
+```
+#28  调用方【传了】，被调用方【签名没加】  ⇒ 【接口不匹配】
+#29  值【存在】，但【没人传】                ⇒ 【链路缺一段】
+```
+
+⇒ 两者都会 `TypeError` 或静默错，但根因完全不同：
+**#28 是两端的类型对不上，#29 是中间那根线根本不存在。**
+
+### 修复
+
+```python
+# main.py —— 把 spec 送下去
+W, _ = build_target_weights(_fval, rdates, panels["can_trade"],
+                            n_layers=spec.n_layers)
+res = run_all_layers(W, panels, rdates,
+                     fee_buy=spec.fee_buy, fee_sell=spec.fee_sell,
+                     slippage=spec.slippage, init_cash=spec.init_cash)
+
+# report.py —— build_report 加 spec 参数，meta 从 spec 取（spec=None 时回落常量）
+def build_report(..., spec=None) -> dict:
+    meta = {..., "fee_buy": spec.fee_buy if spec else 0.00025, ...}
+```
+
+### 教训
+
+> **「配置中心有了」≠「配置生效了」。**
+>
+> 而**默认值和配置值相同时，断链完全隐身** —— 这是它最阴的地方：
+> 所有检查都过，所有数字都对，因为**两条路走出来的结果一样**。
+
+由此推出一条纪律：
+
+```
+★ 配置化改造必须【同时改一个值验证一次】
+   ⇒ 否则你只是把参数从一个地方搬到另一个地方，没接线
+```
+
+这也解释了为什么 T-3.4 的 `freq` 参数化**必须先修通这条链路** ——
+否则 `freq` 会变成**第 10 个住进死信箱的参数**。
+
+### 与前面几条的关系
+
+    #19  默认值藏口径        → 那条说"默认值是隐含假设"，这条说"默认值会掩盖断链"
+    #26  冗余不校验          → 那条防"两份不一致"，这条防"一份没被用"
+    #28  wiring 断裂        → 那条是"接口不匹配"，这条是"链路缺一段"
+
+
+---
+
+## #30 【根因】pandas 的宽表二元算术在 ≈300 万元素下偶发返回【常数垃圾数组】—— #23 的真凶
+
+**发现日期**：2026-11-03
+**发现方式**：用户改 `freq: "W-FRI"` 后连跑两次，**同一配置、同一数据，`§0 pp` 出现 0.11 与 0.52**
+⇒ 这是 5 个月来第一次拿到【可复现】的差异。
+
+### 现象（最小复现）
+
+```python
+hc = panels["hfq_close"].ffill().reindex(rdates)   # 553 × 5476, float32
+sh = hc.shift(-1)                                  # md5 100/100 稳定
+nxt = sh / hc - 1.0                                # ★ 100 次里 3 次结果不同
+```
+
+同一次进程里跑 100 次，得到 **3 个不同结果**：
+
+| 版本 | 现象 | 与 numpy 基准的差异 |
+|---|---|---|
+| 正确 | 正常收益率 | 67 个（float32→float64 精度差，非 bug）|
+| 错 A | **100% 全是 0** | 2,918,205 个元素变成 0 |
+| 错 B | **100% 全是 −1** | 3,028,228 个元素变成 −1 |
+
+⇒ 错 A 意味着除法返回 **1**（`1−1=0`）；错 B 意味着除法返回 **0**（`0−1=−1`）
+⇒ ⇒ **pandas 返回了一个【根本没被真正计算】的常数数组** —— 形状对、dtype 对、数据全错 ✓
+
+### 触发条件（实测，各 200 次）
+
+| 形状 / dtype | 唯一结果数 | 失败率 |
+|---|---|---|
+| **553×5476 float32（全量）** | 2 | **1.0%** |
+| **553×5476 float64** | 2 | 0.5% |
+| 100×5476 float32 | 1 | 0.0% |
+| 553×500 float32 | 1 | 0.0% |
+| 100×500 float32 | 1 | 0.0% |
+| 50×50 float32 | 1 | 0.0% |
+
+⇒ **缩小任一维就不出错 ⇒ 规模依赖**（与 #24 标题吻合）✓
+
+### numpy 对照
+
+```python
+sh.to_numpy() / hc.to_numpy() - 1.0     # 100/100 完全一致
+```
+
+⇒ **同一份数据、同一个除法，numpy 稳如磐石** ✓
+
+### 为什么它在 5 个月里躲过所有排查
+
+```
+① 失败率 0.5%~1% ⇒ 单次跑基本碰不到，要连跑几十次才现形
+② 症状是【数字偏小】，不是崩溃 ⇒ 看起来像"数据问题"
+③ 形状/dtype 全对 ⇒ pandas 的 assert、我们的 assert 全部放行
+④ 它只在【全量面板】上发作 ⇒ 用假数据写测试【永远测不出来】**✗
+⑤ 它只影响【这一个操作】—— .where / .shift / .ffill / .sum 全部实测稳定
+   ⇒ 排查时逐个排除，都"通过"了，反而更迷惑
+```
+
+### 其他 pandas 宽表操作的稳定性（各 100~200 次，全部通过）
+
+```
+ok.reindex(columns=cols)         1 个唯一 md5  ✓
+.fillna(False)                   1 个唯一 md5  ✓
+hfq_close.ffill()                1 个唯一 md5  ✓
+ret_1d_hfq.where(can_trade)      1 个唯一 md5  ✓
+close.mean(axis=1) / .sum(axis=1) 1 个唯一 md5 ✓
+equal_weight_nav(panels)         1 个唯一 md5  ✓（200 次）
+⇒ 【只有 DataFrame ÷ DataFrame 这一种二元算术中招】
+```
+
+### 修复
+
+`_blocked_pp` 改成纯 numpy（连 `shift` 都不用，显式预填 NaN 再写 `[1:]`）：
+
+```python
+hc = panels["hfq_close"].ffill().reindex(ex).to_numpy(dtype="float64")
+...
+nxt = np.full(hc.shape, np.nan, dtype="float64")
+nxt[:-1] = hc[1:] / hc[:-1] - 1.0
+lost = np.nansum(bb * px * nxt, axis=1) - np.nansum(bs * px * nxt, axis=1)
+return float(np.nanmean(lost / nav)) * periods_per_year * 100
+```
+
+**验证**：300 次调用 → **300/300 同一个值 0.516727** ✓
+
+### 全仓扫描结果
+
+```
+DataFrame ÷ DataFrame（中招的那一种）：
+  → 只有 _blocked_pp 一处，已改成 numpy
+  → 现在【生产代码里一个都没有了】
+
+.where / .shift / .ffill / .sum(axis=1)：
+  → 实测全部稳定，保留不动
+  → 但已列入「同族风险观察名单」，将来若再现怪数，先怀疑它们
+```
+
+### 教训
+
+> **「库的运算"是确定性的」是一个【假设】，不是【事实】。**
+>
+> 而这个假设在 5 个月里从没被检验过 —— 因为：
+> ① 它几乎总是对的（99%+）
+> ② 错了也只会让数字偏小，不会崩
+> ③ 而测试用的是【小假数据】，永远触发不到
+
+由此推出三条纪律：
+
+```
+★ ① 宽表（≥ 约 300 万元素）上的 pandas 二元算术，一律改 numpy
+     —— engine.py / features.py 早就这么做了（注释里写着"改 numpy 后问题消失"），
+        _blocked_pp 是最后一个漏网的
+
+★ ② 新写任何宽表运算，先跑 200 次 md5 比对再合并
+     —— 这是【唯一】能发现这一类的办法
+
+★ ③ 确定性测试必须用【真面板】，不能用假数据
+     —— 假数据太小，永远不会触发规模依赖的 bug
+```
+
+### 与前面几条的关系
+
+    #23 偶发算出错误结果  → 那条是"症状描述"，本条是"根因"
+    #24 写入权外包给库    → 那条说"别让库替你写"，本条给出"哪一个库、哪一种调用"
+    #26 冗余不校验        → 那条说"两份要对账"，本条说"一份本身就可能被库改坏"

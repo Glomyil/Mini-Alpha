@@ -19,7 +19,7 @@ OUT = Path(__file__).resolve().parents[1] / "reports" / "cost_sensitivity.md"
 
 def main():
     panels = load_panels()
-    rdates = [d for d in rebalance_dates(panels["hfq_close"].index) if d.year >= 2016]
+    rdates = [d for d in rebalance_dates(panels["hfq_close"].index, rule="ME") if d.year >= 2016]
 
     bench = equal_weight_nav(panels).reindex(panels["hfq_close"].index).ffill()
     bench = bench.loc[rdates[0]:]
@@ -67,7 +67,7 @@ def main():
              "> 只改滑点，佣金固定 0.00025/0.00075。基准（全A等权）不扣费，三档相同。", "",
              "> 基准年化 **{:.2%}**".format(bench_ann), "",
              "## 1. 三档总表", "",
-             "| 滑点 | 排名(年化) | 排名(超额) | 因子 | 层4年化 | 超额 | 累计换手 | 费用合计 |",
+             "| 滑点 | 排名(年化) | 排名(超额) | 因子 | 层4年化 | 超额 | 累计换手 | 佣金合计 |",
              "| :-- | --: | --: | :-- | --: | --: | --: | --: |"]
     for sl in SLIPS:
         sub = df[df["slip"] == sl].sort_values("ann4", ascending=False)

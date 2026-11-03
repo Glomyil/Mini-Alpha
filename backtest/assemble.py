@@ -26,8 +26,28 @@ def build_features(panels, factor_names, cache=None):
     return out
 
 
-def rebalance_dates(index, rule="ME"):  # 确认好调仓频率，这个写入的代表频率是一月一次
-    return pd.Series(index, index=index).resample(rule).last().dropna().tolist()
+_KNOWN_RULES = frozenset({"ME", "QE", "W-FRI"})
+
+
+def rebalance_dates(index, rule):
+    """调仓日 = 每个 rule 周期的最后一个交易日。
+
+    rule 必须显式传（来自 spec.freq）—— 留默认值会让「不传就月频」和
+    「传月频」变成两条静默分叉的路（PITFALLS #19）。
+
+    注意 resample 的【组标签】和【取值】是两回事：
+    标签可能不是交易日（W-FRI 的最后一组标签是 2021-01-01，元旦），
+    但 .last() 取的是「该组最后一个【存在的 index 值】」，所以 rdates 必然落在 index 上。
+    下面用一条断言把这个性质变成契约，而不是靠 docstring 说「我测过」。
+    """
+    if rule not in _KNOWN_RULES:
+        raise ValueError(f"未知调仓频率 {rule!r}，可用：{sorted(_KNOWN_RULES)}")
+    rdates = pd.Series(index, index=index).resample(rule).last().dropna().tolist()
+    _bad = [d for d in rdates if d not in index]
+    assert not _bad, (
+        f"{rule} 产出了 {len(_bad)} 个非交易日调仓日：{[str(d.date()) for d in _bad[:3]]}"
+        f" —— 下游全部假设 rdates ⊆ 交易日，拒绝继续")
+    return rdates
 
 
 def factor_corr(feats, factor_names, dates, min_names=30):  # 注：实际上进行多因子同时回测的时候为了防止把多个因子当作一个来看
@@ -81,7 +101,7 @@ def main():
         print(f"（只跑了 1 个因子 {FACTOR_LIST[0]} → 相关性小表跳过：它需要 ≥2 个因子才有意义）")
     else:
         dates = [d for d in rebalance_dates(
-            panels["hfq_close"].index) if d.year >= 2016]
+            panels["hfq_close"].index, rule="ME") if d.year >= 2016]
         corr = factor_corr(feats, FACTOR_LIST, dates)
         print()
         print(f"相关性小表（定向后，{len(dates)} 个调仓日平均；|ρ|>0.7 = 基本同一个因子）")

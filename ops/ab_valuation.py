@@ -77,7 +77,7 @@ def table(nav, label):
 
 
 panels = load_panels()
-rdates = [d for d in rebalance_dates(panels["hfq_close"].index) if d.year >= 2016]
+rdates = [d for d in rebalance_dates(panels["hfq_close"].index, rule="ME") if d.year >= 2016]
 W, layers = weights_for_factor(FAC, panels, rdates)
 res = run_all_layers(W, panels, rdates)
 

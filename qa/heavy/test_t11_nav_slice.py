@@ -22,7 +22,8 @@ def test_slice_drops_empty_prefix():
     from backtest.panel import load_panels
 
     panels = load_panels()
-    rdates = [d for d in rebalance_dates(panels["hfq_close"].index) if d.year >= 2016]
+    rdates = [d for d in rebalance_dates(panels["hfq_close"].index, rule="ME")
+              if d.year >= 2016]
     first = rdates[0]
 
     idx = panels["hfq_close"].index
@@ -45,7 +46,8 @@ def test_nav_frame_index_covers_panel():
     from backtest.weights import build_target_weights
 
     panels = load_panels()
-    rdates = [d for d in rebalance_dates(panels["hfq_close"].index) if d.year >= 2016]
+    rdates = [d for d in rebalance_dates(panels["hfq_close"].index, rule="ME")
+              if d.year >= 2016]
     spec = FACTORS["rev_5d"]
     fv = spec["fn"](build_features(panels, ["rev_5d"]), {}) * spec["sign"]
     W, _ = build_target_weights(fv, rdates, panels["can_trade"])
