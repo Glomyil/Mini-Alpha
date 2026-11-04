@@ -80,6 +80,31 @@ _RESEARCH_KEYS = frozenset({
 #   ⚠️ 只用 pandas ≥ 2.2 的新别名：M / Q 已废弃，会刷 FutureWarning
 _PERIODS_PER_YEAR = {"ME": 12, "QE": 4, "W-FRI": 52}
 
+# 调仓频率 → 报告里印的中文名。和 _PERIODS_PER_YEAR 放一起：频率的「意思」只有这一处说了算。
+#   ⚠️ 报告以前把「月频」写成字面量 ⇒ 改 freq 后印「调仓：月频（553 期）」，
+#      月频 553 期 = 46 年。数字变了标签没变，这是最典型的误导性 bug。
+#   ⚠️ 没有的键【不猜】—— 原样印出代码（PITFALLS #19：默认值不许藏口径）
+_FREQ_LABEL = {"ME": "月频", "QE": "季频", "W-FRI": "周频"}
+
+
+def freq_label(freq) -> str:
+    """频率代码 → 报告用的中文名。未知代码原样返回，不静默退回「月频」。"""
+    return _FREQ_LABEL.get(str(freq), str(freq))
+
+
+# 股票池代码 → 报告里印的一句话。和 freq_label 同一个套路：未知代码原样印，不猜。
+#   「宇宙 / universe」是硬译，报告里改成「股票池」（券商研报的标准说法）。
+_UNIVERSE_LABEL = {
+    # ⚠️ 只描述「池子里有什么」，不描述限价细节 —— ST 的 5% 只对【主板】成立，
+    #    创业板/科创板 ST 走 20%，写一句笼统的「ST 按 ±5% 限价」会变成错话。
+    "all": "全 A（含 ST / 次新股 / 微盘，未剔除）",
+}
+
+
+def universe_label(u) -> str:
+    """股票池代码 → 报告用的中文描述。未知代码原样返回。"""
+    return _UNIVERSE_LABEL.get(str(u), str(u))
+
 
 def _check_research_keys(config) -> None:
     """application.yml 的 research 节里出现未知键 => 立刻报错。

@@ -179,19 +179,30 @@ def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> 
     return pd.Series(out, name="rank_ic", dtype="float64")
 
 
-def ic_summary(ic: pd.Series) -> dict:
+def ic_summary(ic: pd.Series,
+               periods_per_year: int = REBALANCE_PERIODS_PER_YEAR) -> dict:
     # valid periods (DEBT-013: len(ic) used to count NaN periods too)
     n = int(ic.notna().sum())        # 有效期数（DEBT-013：以前用 len(ic)，把 NaN 的期也算进去了）
     n_bad = int(len(ic) - n)             # invalid periods
     if n == 0:
         return {"ic_mean": float("nan"), "ic_std": float("nan"),
-                "ic_ir": float("nan"), "n": 0, "n_bad": n_bad}
+                "ic_ir": float("nan"), "ic_pos_rate": float("nan"),
+                "n": 0, "n_pos": 0, "n_bad": n_bad}
     ic = ic.dropna()
     sd = float(ic.std(ddof=1))
+    # IC>0 胜率：有均值没稳定性会飘，胜率才说明「方向稳不稳」。
+    # 严格 > 0（IC 恰好 0 不算正）——和券商研报口径一致。
+    # n_pos 直接返回，不让调用方拿比率乘回去四舍五入（那会偶尔差 1 期）。
+    n_pos = int((ic > 0).sum())
     return {"ic_mean": float(ic.mean()),
             "ic_std": sd,
-            "ic_ir": float(ic.mean() / sd * np.sqrt(REBALANCE_PERIODS_PER_YEAR)) if sd else float("nan"),
-            "n": n, "n_bad": n_bad}
+            # ⚠️ 年化粒度必须由调用方按 freq 传：写死 12 的话 freq=W-FRI 时
+            #    banner 印「IC-IR 用 52 期/年」而数字按 √12 算 —— IR 少报 √(52/12)≈2 倍。
+            #    退化的判法照抄 sharpe() 的绝对阈值，不用 if sd（浮点残差会让它印 1e16）。
+            "ic_ir": (float(ic.mean() / sd * np.sqrt(periods_per_year))
+                      if sd >= 1e-12 else float("nan")),
+            "ic_pos_rate": float(n_pos / n),
+            "n": n, "n_pos": n_pos, "n_bad": n_bad}
 
 
 def _period_returns(nav: pd.Series, index) -> np.ndarray:
@@ -306,6 +317,22 @@ def ls_summary(nav_df: pd.DataFrame, rdates, *, borrow_cost: float = 0.08,
 
     t, p = t_stat(diff)
 
+    # ④ 多空夏普 / 最大回撤（2026-11-04 加）
+    #    夏普 = 年化收益 / 年化波动；年化波动 = 每期标准差 × √N（是乘不是除 ——
+    #    波动按 √N 放大，收益按复利年化，两者不能混）。
+    #    每期收益恒定时标准差 = 0 ⇒ 夏普无定义，必须 NaN（不许 inf）——
+    #    和 sharpe() 对「净值恒定」的处理保持同一条纪律。
+    #   ⚠️ 判断「退化」不能只写 vol > 0 —— 恒定序列的 sd 是 1e-17 级浮点残差，
+    #      会算出 3.2e14 的垃圾夏普。这里【照抄 sharpe() 的绝对阈值 1e-12】，
+    #      不另发明一套：同一个项目里同一个概念只能有一种判法。
+    _sd = float(np.std(diff, ddof=1)) if diff.size > 1 else 0.0
+    _ann_vol = _sd * math.sqrt(periods_per_year)
+    _sharpe = (float("nan")
+               if (not np.isfinite(_ann_vol) or _ann_vol < 1e-12)
+               else ls_ann / _ann_vol)
+    # 最大回撤直接用 ls_nav（已经是复利累计），复用 max_drawdown 不用另写
+    _mdd = max_drawdown(pd.Series(ls_nav))
+
     return {
         "层差(pp)":   float(ann_return(nl, trading_days) - ann_return(ns, trading_days)),
         "多空年化":   ls_ann,
@@ -313,6 +340,8 @@ def ls_summary(nav_df: pd.DataFrame, rdates, *, borrow_cost: float = 0.08,
         "多空净年化": ls_ann - borrow_cost,
         "多空t":      t,
         "多空p":      p,
+        "多空夏普":   _sharpe,
+        "多空最大回撤": _mdd,
         "期数":       int(diff.size),
     }
 
@@ -335,6 +364,10 @@ def layer_table(nav_df: pd.DataFrame, results=None, rf: float = 0.0,
                "夏普": sharpe(nav, rf=rf, trading_days=trading_days)}
         if results is not None:
             row["累计换手"] = turnover_total(results[L]["turnover"])
+            # 每期单边换手 = 累计 ÷ 期数。券商研报印的是【每期】那个数，
+            # 只印累计会被读成"每期换手 105%"（容易误读）。
+            _n_period = max(len(results[L]["turnover"]), 1)
+            row["每期换手"] = row["累计换手"] / _n_period
             # ⚠️ 只含佣金/印花税。滑点被吃进成交价，体现在 nav 里，不记在这列
             #（engine.py:185 buy_val = …*(1+slippage)，所以滑点成本在 cash 上就扣过了）。
             row["佣金合计（不含滑点）"] = fee_total(results[L]["fees"])

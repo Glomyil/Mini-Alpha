@@ -186,7 +186,8 @@ check(near(float(tab.loc[4, "最大回撤"]), MT.max_drawdown(_navL), 1e-12)
 
 # ls_summary 的键集合变了（比值法/日差法/月差法 → 三口径 + t/p + 期数）
 lsv = MT.ls_summary(nav_df, [_navL.index[0], _navL.index[-1]])
-check(set(lsv) == {"层差(pp)", "多空年化", "多空累计", "多空净年化", "多空t", "多空p", "期数"},
+check(set(lsv) == {"层差(pp)", "多空年化", "多空累计", "多空净年化", "多空t", "多空p",
+                    "多空夏普", "多空最大回撤", "期数"},
       f"ls_summary 的键：{sorted(lsv)}")
 # 手算：只取首尾两点 ⇒ 多头 +20%、空头 −10% ⇒ 每期差 = 0.2 − (−0.1) = 0.3
 check(near(lsv["多空累计"], 0.30, 1e-12),
@@ -217,6 +218,59 @@ check(pp > 0.0, "少赚了 ⇒ 必须是正数")
 
 pp0 = MT._blocked_pp(_fake_res([[0.0], [0.0]], [[0.0], [0.0]]), _FLAT, periods_per_year=12)
 check(abs(pp0) < 1e-12, f"什么都没挡 ⇒ 必须恰好 0（实际 {pp0:.3e}）")
+
+print("── ⑨ 报告新增字段（2026-11-04）：IC胜率 / 多空夏普 / 多空回撤 / 每期换手 ──")
+
+# ── IC>0 胜率：手算 2/4 ──
+_ic = pd.Series([0.10, -0.05, 0.20, 0.00])
+_s = MT.ic_summary(_ic)
+check(near(_s["ic_pos_rate"], 0.5, 1e-12),
+      f"IC>0 胜率 = 2/4 = 0.5（实测 {_s.get('ic_pos_rate')}；0.00 不算正数）")
+check(near(_s["ic_mean"], 0.0625, 1e-12), "ic_mean 同时复核（(0.1-0.05+0.2+0)/4 = 0.0625）")
+check(_s["n_pos"] == 2 and _s["n"] == 4, f"n_pos 直接返回 = 2（实测 {_s.get('n_pos')}）")
+
+# IC-IR 的年化粒度必须跟着 periods_per_year：√4 / √12 差 = 2 倍
+_s4 = MT.ic_summary(_ic, periods_per_year=4)
+_s12 = MT.ic_summary(_ic, periods_per_year=12)
+check(near(_s12["ic_ir"] / _s4["ic_ir"], (12 / 4) ** 0.5, 1e-12),
+      f"IC-IR(ppy=12) / IC-IR(ppy=4) 必须 = √3 = {(12/4)**0.5:.4f}"
+      f"（实测 {_s12['ic_ir']/_s4['ic_ir']:.4f}）")
+
+# 恒定 IC ⇒ sd≈0 ⇒ IC-IR 必须 NaN（不许印 1e16 的垃圾）
+_sf = MT.ic_summary(pd.Series([0.05] * 10), periods_per_year=12)
+check(np.isnan(_sf["ic_ir"]), f"IC 恒定 ⇒ IC-IR 必须 NaN（实测 {_sf['ic_ir']}）")
+
+# ── 多空最大回撤：diff = [+10%, −20%, +10%] ──
+#    净值 1.0 → 1.1 → 0.88 → 0.968   峰 1.1、谷 0.88 ⇒ 回撤 = 0.88/1.1 − 1 = −20%（精确）
+_midx = pd.date_range("2020-01-31", periods=4, freq="ME")
+_nv = pd.DataFrame({0: np.ones(4), 4: np.array([1.0, 1.10, 0.88, 0.968])}, index=_midx)
+_ls = MT.ls_summary(_nv, list(_midx), periods_per_year=12)
+check(near(_ls["多空最大回撤"], -0.20, 1e-12),
+      f"多空最大回撤 = 0.88/1.1 − 1 = −20%（实测 {_ls['多空最大回撤']:.6f}）")
+check(-1.0 <= _ls["多空最大回撤"] <= 0.0, "回撤必须落在 [−1, 0]")
+
+# ── 多空夏普：每期收益恒定 ⇒ 标准差 0 ⇒ 必须是 NaN（不许 inf）──
+_nv2 = pd.DataFrame({0: np.ones(13), 4: 1.01 ** np.arange(13)},
+                    index=pd.date_range("2020-01-31", periods=13, freq="ME"))
+_ls2 = MT.ls_summary(_nv2, list(_nv2.index), periods_per_year=12)
+check(np.isnan(_ls2["多空夏普"]), f"每期恒定收益 ⇒ 多空夏普必须 NaN（实测 {_ls2['多空夏普']}）")
+
+# ── 等均值但带波动 ⇒ 复利拖累 ⇒ 多空年化和夏普都必须是负的 ──
+_r = np.array([0.02, -0.02] * 6)                      # 12 期，算术均值 0
+_nv3 = pd.DataFrame({0: np.ones(13), 4: np.concatenate([[1.0], np.cumprod(1 + _r)])},
+                    index=pd.date_range("2020-01-31", periods=13, freq="ME"))
+_ls3 = MT.ls_summary(_nv3, list(_nv3.index), periods_per_year=12)
+check(_ls3["多空年化"] < 0, f"算术均值 0 + 波动 ⇒ 复利为负（实测 {_ls3['多空年化']:.4%}）")
+check(_ls3["多空夏普"] < 0, "同样的道理 ⇒ 夏普必须为负")
+
+# ── 每期换手：累计 6.0 / 2 期 = 3.0 ──
+_nv4 = pd.DataFrame({0: np.ones(3), 4: np.ones(3)},
+                    index=pd.date_range("2020-01-31", periods=3, freq="ME"))
+_tab = MT.layer_table(_nv4, {0: {"turnover": pd.Series([2.0]), "fees": pd.Series([0.0])},
+                             4: {"turnover": pd.Series([2.0]), "fees": pd.Series([0.0])}})
+check("每期换手" in _tab.columns, "layer_table 多出「每期换手」列")
+check(near(float(_tab.loc[0, "每期换手"]), 2.0, 1e-12),
+      f"1 期累计 2.0 ⇒ 每期 2.0（实测 {_tab.loc[0, '每期换手']}）")
 
 check(passed + failed >= 20, f"断言条数守卫：{passed + failed} 条")
 print(f"结果: 通过 {passed} / {passed + failed}")

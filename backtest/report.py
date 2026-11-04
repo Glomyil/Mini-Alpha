@@ -3,6 +3,7 @@ import shutil
 import pandas as pd
 import matplotlib.pyplot as plt
 from backtest import metrics as MT
+from config.research_spec import freq_label, universe_label
 from pathlib import Path
 from loguru import logger
 import matplotlib
@@ -38,7 +39,13 @@ def banner(meta: dict) -> str:
     """口径声明区块 —— 报告的签名（口径②）；缺一项就算没做这一格"""
     return "\n".join([
         "> **口径声明**",
-        f"> - 因子：`{meta['factor']}` ｜ 区间：{meta['start']} ~ {meta['end']} ｜ 调仓：月频（{meta['n_rdate']} 期）",
+        # 「月频」曾经是字面量 ⇒ 改 freq 后期数变了、标签没变（月频 553 期 = 46 年）。
+        # 现在跟着 meta['freq'] 走；未知代码原样印出，不猜（PITFALLS #19）。
+        f"> - 因子：`{meta['factor']}` ｜ 区间：{meta['start']} ~ {meta['end']} ｜ "
+        # 硬索引，不用 .get(默认值)：本函数其余字段都硬索引，
+        # 缺键就该 KeyError（docstring：「缺一项就算没做这一格」）。
+        f"调仓：{freq_label(meta['freq'])}（{meta['n_rdate']} 期）",
+        f"> - 股票池：{universe_label(meta['universe'])}",
         f"> - 净值口径：**{meta['val_basis']}**（收盘 / 开盘两套，另一套作诊断）｜ 成交：**T+1 开盘**（缺价即不成交）",
         f"> - 年化常数：**{meta['trading_days']}** 交易日/年（A 股；252 是美股）｜ IC-IR 用 {meta['periods_per_year']} 期/年",
         f"> - 成本：佣金 {meta['fee_buy']}/{meta['fee_sell']} ｜ 滑点 {meta['slippage']}（单边）｜ 无整手",
@@ -135,7 +142,8 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             factor_val = _fspec["fn"](build_features(
                 panels, [factor]), {}) * _fspec["sign"]
         ic = MT.rank_ic(factor_val, panels, rdates)
-        ic_sum = MT.ic_summary(ic)
+        # IC-IR 的年化粒度必须跟 freq 走（和 banner 印的那个数保持一致）
+        ic_sum = MT.ic_summary(ic, periods_per_year=_ppy)
     stamp = pd.Timestamp.today().strftime(
         "%Y-%m-%d")          # 只进报告正文（文件名不带日期 → 每次运行覆盖同一份）
     outdir.mkdir(parents=True, exist_ok=True)
@@ -151,6 +159,11 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             "n_rdate": len(rdates),
             "trading_days": spec.trading_days if spec else MT.TRADING_DAYS,
             "periods_per_year": spec.periods_per_year if spec else MT.REBALANCE_PERIODS_PER_YEAR,
+            # freq 是报告里「调仓：月频/季频/周频」的唯一来源。不传 spec 时给 "?"
+            # 而不是 "ME" —— 猜一个就等于把月频假设藏起来（PITFALLS #19）。
+            "freq": spec.freq if spec else "?",
+            # 股票池：和 freq 一样，不传 spec 就给 "?"，不猜 "all"（PITFALLS #19）
+            "universe": spec.universe if spec else "?",
             "val_basis": val_basis,
             "fee_buy": spec.fee_buy if spec else 0.00025,
             "fee_sell": spec.fee_sell if spec else 0.00075,
@@ -186,7 +199,11 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             "",
         ]
 
-    parts += ["## 1. 分层指标", "", md_table(layer_tab), "",
+    # 「每期换手」必须按百分比渲染（0.5000 → 50.00%）：它进这张表就是为了
+    # 让人看出「每期换掉一半仓位」，印成 0.5000 等于没达到目的。
+    parts += ["## 1. 分层指标", "",
+              md_table(layer_tab, pct_cols=("年化", "波动", "最大回撤",
+                                            "基准年化", "超额", "每期换手")), "",
               "*「佣金合计」只含佣金与印花税。**滑点不进这一列** —— 它在成交价里"
               "（买入多付、卖出少收），已经体现在净值和年化上。*", ""]
 
@@ -213,15 +230,28 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
                   md_table(yic, index_name="年",
                            pct_cols=("IC均值", "IC胜率")), ""]
     if ic_sum is not None:
+        # IC>0 胜率：只有均值会飘（几期大值就能撑起来），胜率才说明方向稳不稳。
+        # 有效期数为 0 时 ic_pos_rate 是 NaN ⇒ 印 nan，不许崩（报告不该因 NaN 挂掉）。
+        _pos = ic_sum["ic_pos_rate"]
+        if _pos != _pos:
+            _pos_txt = "- **IC > 0 胜率 nan**（没有有效 IC 期，无法计算）"
+        else:
+            _pos_txt = (f"- **IC > 0 胜率 {_pos:.1%}**"
+                        f"（{ic_sum['n_pos']} / {ic_sum['n']} 期为正）")
         logger.info(f"ic 有效:{ic_sum['n']} 无效:{ic_sum.get('n_bad', 0)} "
                     f"mean:{ic_sum['ic_mean']:.4f} ir:{ic_sum['ic_ir']:.4f}")
         parts += ["## 4. IC（标签 = 下一个调仓日的区间收益）", "",
                   f"- IC 均值 **{ic_sum['ic_mean']:.4f}** ｜ 标准差 {ic_sum['ic_std']:.4f} "
-                  f"｜ **IC-IR {ic_sum['ic_ir']:.4f}** ｜ 期数 {ic_sum['n']}", ""]
+                  f"｜ **IC-IR {ic_sum['ic_ir']:.4f}** ｜ 期数 {ic_sum['n']}",
+                  _pos_txt,
+                  ""]
     # ── §5 多空诊断（2026-11-03 重写：删比值法/日差法/月差法，改标准复利 + t/p）──
     _t, _p = ls["多空t"], ls["多空p"]
     _t_txt = "nan" if _t != _t else f"{_t:+.2f}"          # x != x 是 nan 的判据
     _p_txt = "nan" if _p != _p else f"{_p:.3g}"
+    _sh, _mdd = ls["多空夏普"], ls["多空最大回撤"]
+    _sh_txt = "nan" if _sh != _sh else f"{_sh:+.2f}"
+    _mdd_txt = "nan" if _mdd != _mdd else f"{_mdd:.2%}"
     parts += ["## 5. 多空诊断（不可直接交易）", "",
               "> 多空不是交易策略 —— A 股个股做空基本不可行（券源少、费率高、很多票没券）。",
               "> 它是「因子纯度的体温计」：剥离市场 beta 之后还剩多少 alpha。",
@@ -236,6 +266,10 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
               f"| **多空净** | **{ls['多空净年化']:+.2%}** | — "
               f"| 扣 {_bc:.0%}/年融券费 |",
               "",
+              # 多空夏普 / 最大回撤（2026-11-04）：只有均值+t 不够，得看路径。
+              #   ⚠️ 这两个都基于【每期】差值序列，年化用 periods_per_year，不是 trading_days。
+              f"> 多空夏普 **{_sh_txt}** ｜ 最大回撤 **{_mdd_txt}**"
+              f"（零成本口径，按 {ls['期数']} 期）",
               f"> 配对 t = **{_t_txt}** ｜ p = **{_p_txt}**"
               f"（n = {ls['期数']} 期，df = {ls['期数'] - 1}，p 用正态近似）",
               "> 「层差」是两个年化率相减（pp），**不存在累计口径**，所以那格写「—」。", ""]

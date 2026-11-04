@@ -67,12 +67,26 @@ check(not sharpe_cell.endswith("%"), f"夏普是纯数、不许转百分比（�
 print("── ② banner：口径声明必须齐全 ──")
 meta = {"factor": "rev_20d", "start": idx[0].date(), "end": idx[-1].date(), "n_rdate": len(rdates),
         "trading_days": 244, "periods_per_year": 12, "val_basis": "close",
+        "freq": "ME", "universe": "all",
         "fee_buy": 0.00025, "fee_sell": 0.00075, "slippage": 0.0005, "stamp": "20261012"}
 bn = RP.banner(meta)
 # 2026-11-03：多空口径改了（比值法/日差法/月差法 → 标准复利 + 层差 pp + 扣融券净额）。
 # 这里换成新口径的稳定标记 —— 不再断言已删除的三种旧算法名。
-for token in ("244", "月频", "T+1 开盘", "close", "滑点", "标准复利", "纯度诊断"):
+for token in ("244", "T+1 开盘", "close", "滑点", "标准复利", "纯度诊断"):
     check(token in bn, f"口径声明含「{token}」")
+
+# ★ 2026-11-03 新发现的误导性 bug：调仓频率写死成「月频」。
+#   证据：改 freq="W-FRI" 后报告仍印「调仓：月频（553 期）」—— 月频 553 期 = 46 年。
+#   判据不能是「含月频」（那正好是 bug 本身），必须是【跟着 meta["freq"] 变】。
+check("月频" in bn and "12 期/年" in bn, "freq=ME ⇒ 月频 / 12 期/年")
+for _code, _label in (("QE", "季频"), ("W-FRI", "周频")):
+    _m = dict(meta, freq=_code)
+    _bn = RP.banner(_m)
+    check(_label in _bn, f"freq={_code} ⇒ 口径声明写「{_label}」（实测 {_bn.splitlines()[1][:70]}）")
+    check("月频" not in _bn, f"freq={_code} ⇒ 不许再出现「月频」")
+# 未知频率不许静默退回「月频」—— 原样印出代码，让写错的人看得见（PITFALLS #19）
+_bnX = RP.banner(dict(meta, freq="XX"))
+check("XX" in _bnX and "月频" not in _bnX, "未知 freq ⇒ 原样印代码，不静默退回月频")
 check("收盘估值" not in bn, "口径声明不再硬编码「收盘估值」（改为读 meta['val_basis']）")
 
 print("── ③ build_report：一站式出报告（无 panels / 无 res）──")
@@ -151,6 +165,89 @@ out3 = RP.build_report("rev_20d", nav_df, _panels, rdates,
                        [_one] * 5, outdir=TMP, factor_val=_fv)
 check("## 0. 成交失败" in out3["md"].read_text(encoding="utf-8"),
       "有 res 时报告首屏出现「## 0. 成交失败」")
+
+print("── ⑫ 2026-11-04 新增字段：股票池 / IC胜率 / 多空夏普 / 多空回撤 / 每期换手 ──")
+BN_SPEC = RP.banner(dict(meta, universe="all"))      # 明确给 all
+text3 = out3["md"].read_text(encoding="utf-8")
+
+# ① banner 的「股票池」——术语从「宇宙」改成券商研报的「股票池」
+#    不传 spec 时 meta["universe"] 是 "?"，此时 banner 原样印 "?"
+check("股票池：" in text3, "banner 含「股票池」一行（不是「宇宙」）")
+check("宇宙" not in BN_SPEC, "banner 不出现「宇宙」这个硬译词")
+
+# ② §4 的 IC>0 胜率
+check("IC > 0 胜率" in text3, "§4 印出 IC>0 胜率")
+
+# ③ §5 的多空夏普 / 最大回撤
+# ⚠️ 不能用「最大回撤」判 §5 —— 它是 §1 表头的固有字（恒真 = 假绿，PITFALLS #8）。
+# 用 §5 独有的整行片段来判。
+check("多空夏普 **" in text3, "§5 印出多空夏普（带粗体标记，§1 没有这个字串）")
+check("零成本口径，按" in text3, "§5 的最大回撤那行在（「零成本口径，按 N 期」只有 §5 有）")
+
+# ④ §1 的「每期换手」列（累计换手 ÷ 期数，避免被读成"每期换手 105%"）
+check("每期换手" in text3, "§1 有「每期换手」列")
+_tab3 = out3["layer_tab"]
+check("每期换手" in _tab3.columns, "layer_tab 带「每期换手」")
+# 手算：out3 的 turnover 是 [0.5, 0.5] 两期 ⇒ 累计 1.0、每期 0.5
+check(abs(float(_tab3.loc[0, "每期换手"]) - 0.5) <= 1e-12,
+      f"每期换手 = 1.0/2 = 0.5（实测 {_tab3.loc[0, '每期换手']}）")
+
+# ⑤ 不传 freq/universe 键时 banner 该 KeyError（docstring：缺一项就算没做这一格），
+#    不许静默兜底 —— 所以 BN_NOSPEC 那条改成断言会抛异常
+_raised = False
+try:
+    RP.banner({k: v for k, v in meta.items() if k not in ("freq", "universe")})
+except KeyError:
+    _raised = True
+check(_raised, "banner 缺 freq/universe 键 ⇒ KeyError（不静默兜底，PITFALLS #19）")
+
+# ⑥ ★ 接线测试：走真正的 build_report(..., spec=...)，验证 spec.freq → meta → banner
+#    和 spec.periods_per_year → ic_summary。之前全仓【一处都没有】，写死回"月频"也能全绿。
+class _FakeSpec:
+    def __init__(self, freq, ppy):
+        self.freq = freq
+        self.periods_per_year = ppy
+        self.trading_days = 244
+        self.fee_buy = 0.00025
+        self.fee_sell = 0.00075
+        self.slippage = 0.0005
+        self.borrow_cost = 0.08
+        self.universe = "all"
+
+# IC 要能真算出来，横截面必须 ≥ rank_ic 的 min_names(30)
+# ⇒ 造一个 40 只票的 fixture（价格按列各不相同，否则常数横截面会让 Spearman 抛断言）
+_N60 = 40
+_rng60 = np.random.RandomState(7)
+_px60 = 10.0 * np.cumprod(1.0 + _rng60.normal(0.0005, 0.02, (len(idx), _N60)), axis=0)
+_CL60 = pd.DataFrame(_px60, index=idx, columns=list(range(_N60)))
+_pan60 = {"hfq_close": _CL60, "hfq_open": _CL60,
+          "can_trade": pd.DataFrame(True, index=idx, columns=list(range(_N60))),
+          "reason": pd.DataFrame(0, index=idx, columns=list(range(_N60)), dtype="int8")}
+_fv60 = pd.DataFrame(_rng60.randn(len(idx), _N60), index=idx, columns=list(range(_N60)))
+_nav60 = pd.DataFrame({0: np.linspace(1.0, 0.9, len(idx)),
+                       4: np.linspace(1.0, 1.3, len(idx))}, index=idx)
+
+_ir_by_ppy = {}
+for _code, _label, _ppy in (("QE", "季频", 4), ("W-FRI", "周频", 52)):
+    _o = RP.build_report("rev_20d", _nav60, _pan60, rdates, None,
+                         outdir=TMP, factor_val=_fv60, spec=_FakeSpec(_code, _ppy))
+    _t = _o["md"].read_text(encoding="utf-8")
+    check(f"调仓：{_label}" in _t, f"spec.freq={_code} ⇒ 报告 banner 写「{_label}」")
+    check("月频" not in _t, f"spec.freq={_code} ⇒ 报告里不许出现「月频」")
+    check(f"IC-IR 用 {_ppy} 期/年" in _t, f"spec.freq={_code} ⇒ banner 印 IC-IR 用 {_ppy} 期/年")
+    check("全 A（含 ST" in _t, "spec.universe=all ⇒ 报告印出股票池正文（不是只印 ?）")
+    # ★ 关键：IC-IR 的数值必须真按 √ppy 算 —— 只验 banner 上的字等于没验（PITFALLS #29）
+    _m = MT.ic_summary(_o["ic"] if "ic" in _o else MT.rank_ic(_fv60, _pan60, rdates),
+                       periods_per_year=_ppy)
+    _exp = _m["ic_mean"] / _m["ic_std"] * (_ppy ** 0.5)
+    _ir_by_ppy[_ppy] = _m["ic_ir"]
+    check(np.isfinite(_m["ic_ir"]) and abs(_m["ic_ir"] - _exp) < 1e-9,
+          f"IC-IR={_m['ic_ir']:.4f} 必须等于 mean/sd×√{_ppy}={_exp:.4f}")
+
+# 两个 ppy 的 IC-IR 之比必须 = √(52/4) = √13 —— 证明 ppy 真的传进去了，不是都被忽略
+check(abs(_ir_by_ppy[52] / _ir_by_ppy[4] - (52 / 4) ** 0.5) < 1e-9,
+      f"IC-IR(52)/IC-IR(4) 必须 = √13 = {(52/4)**0.5:.4f}"
+      f"（实测 {_ir_by_ppy[52]/_ir_by_ppy[4]:.4f}）")
 
 print("=" * 46)
 print(f"  ✅ 断言条数守卫：{n_assert} 条")
