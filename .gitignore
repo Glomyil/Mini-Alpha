@@ -54,8 +54,13 @@ ETF数据复权替换方案.md
 # ---- 回测面板缓存（4 张宽表 ≈163 MB；可重建，不入库）----
 backtest/cache/
 
-# ---- 因子灵感（本地私有笔记，不进公开仓）----
+# ---- 本地私有笔记（不进公开仓）----
 因子灵感.txt
+idea.txt
+工作流.txt
+工作流-细则.txt
+ROADMAP_v1.md
+# ⚠️ 注意：.github/workflows/ci.yml 是【CI 配置】，绝不能忽略（名字里也有 workflow）
 logs/
 
 reports/
