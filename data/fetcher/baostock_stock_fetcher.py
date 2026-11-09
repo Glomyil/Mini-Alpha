@@ -81,7 +81,12 @@ DEFAULT_PARAMS: Dict[str, Any] = {
 }
 
 KLINE_FIELDS: str = (
-    "date,code,open,high,low,close,volume,amount,tradestatus,isST"
+    # 2026-11-04 加 turn（换手率）：流通股本 = volume / (turn/100)，
+    # 流通市值 = close(未复权) × 流通股本。实测 sh.600000 反推 293.44 亿股
+    # vs 实际 293.52 亿股（误差 0.03%），且年内 CV ≈ 0.0001。
+    # ⚠️ 加字段必须【全量重下】—— --update 增量只会把 turn 填在最后几天，
+    #    历史行 concat 后全是 NaN（已实测推演，见 T-6.1 工单）。
+    "date,code,open,high,low,close,volume,amount,turn,tradestatus,isST"
 )
 
 # 交易状态/ST 为空字符串时的兜底值(非价格类字段, 允许补 0)
@@ -107,10 +112,14 @@ def _logout(bs: Any) -> None:
         pass
 
 
-def fetch_kline(bs: Any, code: str, start: str, end: str) -> pd.DataFrame:
-    """不复权日线(adjustflag=3), 含 tradestatus/isST"""
+def fetch_kline(bs: Any, code: str, start: str, end: str,
+                fields: str = KLINE_FIELDS) -> pd.DataFrame:
+    """不复权日线(adjustflag=3), 含 tradestatus/isST
+
+    fields: 默认全部 KLINE_FIELDS；补字段时只查需要的那几个（见 backfill_one）
+    """
     rs = bs.query_history_k_data_plus(
-        code, KLINE_FIELDS, start_date=start, end_date=end,
+        code, fields, start_date=start, end_date=end,
         frequency="d", adjustflag="3",
     )
     if rs.error_code != "0":
@@ -120,7 +129,7 @@ def fetch_kline(bs: Any, code: str, start: str, end: str) -> pd.DataFrame:
         rows.append(rs.get_row_data())
     if not rows:
         return pd.DataFrame()
-    expected_cols = KLINE_FIELDS.split(",")
+    expected_cols = fields.split(",")
     df = pd.DataFrame(rows)
     if df.shape[1] != len(expected_cols):
         # 防御: 畸形返回(网络损坏/服务端异常)时给出可诊断信息, 而不是 pandas 的抽象报错
@@ -129,11 +138,15 @@ def fetch_kline(bs: Any, code: str, start: str, end: str) -> pd.DataFrame:
             f"code={code}, 首行={rows[0]!r}"
         )
     df.columns = expected_cols
-    # 类型: 价格/量 -> float(空串转 NaN); 状态 -> int(空串补 0)
-    for col in ["open", "high", "low", "close", "volume", "amount"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    # 类型: 价格/量/换手 -> float(空串转 NaN); 状态 -> int(空串补 0)
+    #   用 in df.columns 判断，这样补字段时只带 close,volume,turn 也不会 KeyError
+    for col in ["open", "high", "low", "close", "volume", "amount", "turn"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     for col in ["tradestatus", "isST"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(_MISSING_STATUS_FILL).astype("int8")
+        if col in df.columns:
+            df[col] = (pd.to_numeric(df[col], errors="coerce")
+                       .fillna(_MISSING_STATUS_FILL).astype("int8"))
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"]).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
     return df
@@ -212,6 +225,100 @@ def process_one(bs: Any, code: str, start: str, end: str, target: Path) -> Dict[
 # ============================================================================
 # 增量更新(2026-09-09 新增): 只追加新交易日, 不重下历史
 # ============================================================================
+
+# ============================================================================
+# 补字段(2026-11-09 新增): 给【已有文件】补上后来才加进 KLINE_FIELDS 的列
+#
+#   为什么需要：turn 是在 5476 个文件已经落盘之后才加的。
+#     整段重下 = 15 小时（还容易被限流）；
+#     只查缺的那一个字段 = 约 5 小时，而且【其余字段一个字节都不动】。
+#
+#   设计原则（很重要）：
+#     ① 只查缺的字段，不重下已有字段 —— 已有数据是已验收的资产，不冒被替换的风险
+#     ② 多带一个 close 作【对齐校验】：新查的 close 必须和原文件逐行一致，
+#        不一致说明日期错位或数据源改了历史 ⇒ 当场报错，绝不静默合并
+#     ③ 日期范围用【原文件自己的】范围，不拉长也不缩短
+# ============================================================================
+
+_REQUIRED_FIELDS: tuple = tuple(KLINE_FIELDS.split(",")) + ("back_adj_factor",)
+
+
+_NUMERIC_FIELDS = ("open", "high", "low", "close", "volume", "amount", "turn")
+
+
+def missing_fields(target: Path) -> List[str]:
+    """这个文件缺哪些必备列（只读 parquet 的 schema，不读数据，很快）。
+
+    ⚠️ 「存在但类型不对」也算缺 —— 实测踩过：
+       2026-11-04 第一次只把 turn 加进 KLINE_FIELDS，忘了加进 fetch_kline 的数值化列表
+       ⇒ 那批文件的 turn 是 object(字符串)
+       ⇒ 后面 update_one 做 pd.concat([object, float]) 时 pyarrow 直接报
+         ArrowTypeError: Expected bytes, got a 'float' object
+       ⇒ 所以这里把 object 型的数值列也判为"要修"，让它走同一条补字段路径被自动修好。
+    """
+    if not target.exists():
+        return list(_REQUIRED_FIELDS)
+    try:
+        import pyarrow.parquet as pq
+        schema = pq.ParquetFile(target).schema_arrow
+        have = set(schema.names)
+    except Exception:                     # noqa: BLE001  文件损坏 → 当作全缺
+        return list(_REQUIRED_FIELDS)
+    bad = [c for c in _NUMERIC_FIELDS
+           if c in have and str(schema.field(c).type) in ("string", "large_string")]
+    return [c for c in _REQUIRED_FIELDS if c not in have] + bad
+
+
+def backfill_one(bs: Any, code: str, target: Path, missing: List[str]) -> Dict[str, Any]:
+    """给已有文件补缺失字段，只查这些字段 + close(校验)，其余列原样保留。"""
+    existing = pd.read_parquet(target)
+    # 存在但类型不对的列（如 object 型 turn）先丢掉，合并时会以正确类型重建
+    _drop = [c for c in missing if c in existing.columns]
+    if _drop:
+        existing = existing.drop(columns=_drop)
+    d = pd.to_datetime(existing["date"])
+    d0, d1 = str(d.min().date()), str(d.max().date())
+
+    # 要查的字段：缺的 + close(仅作校验，若 close 本身缺席就靠它补)
+    want = sorted(set(missing) | {"close"})
+    df = fetch_kline(bs, code, d0, d1, fields="date,code," + ",".join(want))
+    if df.empty:
+        return {"code": code, "status": "backfill_no_data", "missing": missing}
+
+    # ── 对齐校验：close 必须逐行一致 ──
+    if "close" not in missing:
+        old = existing.assign(_d=d)[["_d", "close"]]
+        new = df[["date", "close"]].rename(columns={"date": "_d"})
+        cmp = old.merge(new, on="_d", how="inner", suffixes=("_old", "_new")).dropna()
+        if len(cmp) == 0:
+            return {"code": code, "status": "backfill_no_overlap", "missing": missing}
+        tol = cmp["close_old"].abs().clip(lower=1e-9) * 1e-9
+        bad = int(((cmp["close_old"] - cmp["close_new"]).abs() > tol).sum())
+        if bad:
+            raise RuntimeError(
+                f"{code} 补字段对齐失败：{bad}/{len(cmp)} 行 close 与原文件不一致 "
+                f"⇒ 日期错位或数据源改了历史，拒绝合并（绝不静默写坏数据）")
+
+    # ── 合并：只把缺失列按 date 贴上去 ──
+    #   ⚠️ add 里【不能带 date 列】—— existing 也有 date，合并时会给两边都加后缀
+    #      （date_x / date_y），把原文件的 date 列弄坏。只带 _d 作连接键。
+    add = df[[c for c in missing if c in df.columns]].copy()
+    add["_d"] = df["date"].to_numpy()
+    if existing["date"].duplicated().any():
+        raise RuntimeError(f"{code} 原文件 date 有重复 ⇒ 拒绝合并（merge 会炸行）")
+    out = existing.assign(_d=d.to_numpy()).merge(add, on="_d", how="left")
+    out = out.drop(columns=["_d"]).sort_values("date").reset_index(drop=True)
+
+    got = [c for c in missing if c in out.columns and out[c].notna().any()]
+    still = [c for c in missing if c not in got]
+    if still:
+        return {"code": code, "status": "backfill_partial", "missing": still}
+
+    tmp = target.with_suffix(".parquet.tmp")
+    out.to_parquet(tmp, compression=PARQUET_COMPRESSION)
+    tmp.replace(target)
+    return {"code": code, "status": "backfilled", "fields": got, "rows": len(out)}
+
 
 def _merge_new_rows(existing: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     """把新行并入旧表: 拼接 -> 同日去重(保留新值) -> 按日期排序。纯函数, 可离线测试。"""
@@ -312,14 +419,26 @@ def _login_retry(retries: int = 8, base_sleep: float = 1.0) -> Any:
     raise RuntimeError(f"baostock login failed after {retries} retries: {last}")
 
 
-def _is_session_error(msg: str) -> bool:
-    """baostock 会话失效标志(10001001=用户未登录)"""
-    return "10001001" in msg or "未登录" in msg
+def _is_session_error(msg) -> bool:
+    """baostock 会话失效标志(10001001=用户未登录)
+
+    ⚠️ 必须容忍【异常对象】：调用方有两类
+         · r.get("error", "")   → str
+         · except ... as e      → RuntimeError 等异常实例
+       2026-11-09 就因为这个：
+
+         return "10001001" in msg          # msg 是 RuntimeError
+         TypeError: argument of type 'RuntimeError' is not iterable
+
+       ⇒ 异常没人接 ⇒ 整个分片进程退出 ⇒ 表现成"十分钟重启两次"
+    """
+    s = str(msg)
+    return "10001001" in s or "未登录" in s
 
 
 def run_codes(codes: List[str], start: str, end: str, resume: bool,
               log_path: Path, label: str, sleep_s: float = 0.6,
-              update: bool = False) -> Dict[str, int]:
+              update: bool = False, backfill_only: bool = False) -> Dict[str, int]:
     """在当前进程内处理 codes; 结果逐行写入 log_path(JSONL); 返回状态计数
     原则: 登录/网络失败绝不崩溃子进程, 一律落 error 行, 交给"重跑续传"兜底。
     sleep_s: 每只股票之间的间隔(秒), 实际应用 ±50% 随机抖动, 降低风控特征。
@@ -336,11 +455,35 @@ def run_codes(codes: List[str], start: str, end: str, resume: bool,
                     ensure_ascii=False) + "\n")
         print(f"[{label}] 登录失败, 整段 {len(codes)} 只记为 error", flush=True)
         return {"error": len(codes)}
+    # `end` 默认 = 日历今天，而数据最多到最后一个交易日。
+    #   周末/节假日/盘中跑时，今天 > 最后交易日 ⇒ 用今天比会让所有文件都"不完整"。
+    #   ⇒ 改成和【全库已有文件的最大日期】比（= 已知的市场最后交易日）。
+    eff_end = end
+    if resume and not backfill_only:      # backfill-only 不碰日期维度，不必扫全库算市场末日
+        _mx = None
+        for _p in STOCK_DAILY_DIR.glob("*.parquet") if STOCK_DAILY_DIR.exists() else []:
+            try:
+                _d = pd.read_parquet(_p, columns=["date"])["date"].max()
+                _mx = _d if _mx is None else max(_mx, _d)
+            except Exception:              # noqa: BLE001  坏文件不该拖垮整轮
+                continue
+        if _mx is not None:
+            eff_end = str(pd.Timestamp(_mx).date())
+
     summary: Dict[str, int] = {}
     consec_errors: int = 0   # 连续失败计数 -> 触发自动冷却(网络风暴期别硬冲)
     try:
         with open(log_path, "w", encoding="utf-8") as logf:
+            _t_start = time.time()
             for i, code in enumerate(codes):
+                # 进度打印放在循环【开头】，不能用 continue 跳过（之前放在末尾，
+                # backfill 分支一 continue 就看不到任何进度了 —— 13 小时的盲跑）
+                if (i + 1) % 20 == 1 or (i + 1) % 20 == 0:
+                    _el = max(time.time() - _t_start, 1.0)   # 防"第一只还没跑完就除零"
+                    _rate = (i + 1) / _el
+                    _eta = (len(codes) - i - 1) / _rate / 60
+                    print(f"[{label}] {i + 1}/{len(codes)} | {summary} | "
+                          f"{_rate * 60:.1f} 只/分 | 剩余 {_eta:.0f} 分", flush=True)
                 target = STOCK_DAILY_DIR / f"{code}.parquet"
                 if update:
                     # 增量模式: 只追加新交易日(文件缺失时自动退回全量)
@@ -351,16 +494,64 @@ def run_codes(codes: List[str], start: str, end: str, resume: bool,
                         r = update_one(bs, code, start, end, target)
                 else:
                     if resume and target.exists():
+                        miss = missing_fields(target)
+                        if miss:
+                            # 缺字段 ⇒ 只补缺的字段（不重下历史）
+                            # ⚠️ 必须包 try：fetch_kline 抛异常时若冒泡，整个分片进程会退出，
+                            #    表现就是"窗口莫名其妙没了"。单只票出错只能算这一只失败。
+                            try:
+                                r = backfill_one(bs, code, target, miss)
+                            except Exception as e:            # noqa: BLE001
+                                if _is_session_error(e):
+                                    _logout(bs)
+                                    bs = _login_retry()
+                                    try:
+                                        r = backfill_one(bs, code, target, miss)
+                                    except Exception as e2:    # noqa: BLE001
+                                        r = {"code": code, "status": "error",
+                                             "error": f"{type(e2).__name__}: {e2}"}
+                                else:
+                                    r = {"code": code, "status": "error",
+                                         "error": f"{type(e).__name__}: {e}"}
+                            logf.write(json.dumps(r, ensure_ascii=False) + "\n")
+                            summary[r.get("status", "?")] = summary.get(r.get("status", "?"), 0) + 1
+                            time.sleep(random.uniform(0.5 * sleep_s, 1.5 * sleep_s))
+                            if r.get("status") != "backfilled" or backfill_only:
+                                # backfill_only：只补字段、不追加新交易日
+                                #   （迁移场景用：数据边界保持和底稿一致，零行为变化）
+                                continue
+                        if backfill_only:
+                            # 只补字段模式下，字段齐了就算完成 —— 不碰日期维度
+                            r = {"code": code, "status": "skipped", "rows": 0}
+                            logf.write(json.dumps(r, ensure_ascii=False) + "\n")
+                            summary["skipped"] = summary.get("skipped", 0) + 1
+                            continue
                         try:
                             existing = pd.read_parquet(target, columns=["date"])
-                            if not existing.empty and str(pd.Timestamp(existing["date"].max()).date()) >= end:
+                            # ⚠️ 和【市场的最后交易日】比，不和日历今天比：
+                            #    end 默认是今天，周末/节假日永远大于任何数据日期
+                            #    ⇒ 用日历比会导致一个都 skip 不掉，把已完成的全部重下 ✗
+                            if not existing.empty and str(pd.Timestamp(existing["date"].max()).date()) >= eff_end:
                                 r = {"code": code, "status": "skipped", "rows": len(existing)}
                                 logf.write(json.dumps(r, ensure_ascii=False) + "\n")
                                 summary["skipped"] = summary.get("skipped", 0) + 1
                                 continue
                         except Exception:
                             pass  # 文件损坏则重下
-                    r = process_one(bs, code, start, end, target)
+                        # 字段已齐、只是日期旧 ⇒ 只追加新交易日（不整段重下 11 年）
+                        #   注意：必须走 update_one 而不是 process_one
+                        #   —— process_one 是"整段替换"，为补 1 天重下 2800 天的数据
+                        try:
+                            r = update_one(bs, code, start, end, target)
+                        except Exception as e:               # noqa: BLE001
+                            r = {"code": code, "status": "error",
+                                 "error": f"{type(e).__name__}: {e}"}
+                    else:
+                        try:
+                            r = process_one(bs, code, start, end, target)
+                        except Exception as e:               # noqa: BLE001
+                            r = {"code": code, "status": "error",
+                                 "error": f"{type(e).__name__}: {e}"}
                     if r.get("status") == "error" and _is_session_error(r.get("error", "")):
                         # 会话被服务端踢下线(10001001): 重新登录后重试该只一次
                         _logout(bs)
@@ -377,8 +568,6 @@ def run_codes(codes: List[str], start: str, end: str, resume: bool,
                         time.sleep(cool)
                 else:
                     consec_errors = 0
-                if (i + 1) % 20 == 0:
-                    print(f"[{label}] {i+1}/{len(codes)} | {summary}", flush=True)
                 time.sleep(random.uniform(0.5 * sleep_s, 1.5 * sleep_s))  # 风控友好间隔
     finally:
         _logout(bs)
@@ -444,6 +633,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 只(全量模式调试用)")
     ap.add_argument("--offset", type=int, default=0, help="跳过前 N 只(配合 --limit 分片)")
     ap.add_argument("--no-resume", action="store_true", help="忽略已有文件强制重下")
+    ap.add_argument("--backfill-only", action="store_true",
+                    help="只补缺失字段(如 turn)，不追加新交易日；配合已有文件做字段迁移")
     ap.add_argument("--update", action="store_true",
                     help="增量模式: 只追加新交易日(不重下历史); 文件缺失时自动全量补")
     ap.add_argument("--child", action="store_true", help="内部参数: 子进程模式(勿手动使用)")
@@ -465,7 +656,7 @@ def main() -> int:
         lp = LOG_DIR / f"stock_download_{ts}_child{args.offset}.jsonl"
         print(f"[{label}] 开始处理 {len(codes)} 只", flush=True)
         summary = run_codes(codes, args.start, args.end, not args.no_resume, lp, label,
-                            args.sleep, update=args.update)
+                            args.sleep, update=args.update, backfill_only=args.backfill_only)
         print(f"[{label}] 完成: {summary}", flush=True)
         return 2 if summary.get("error", 0) else 0
 
@@ -475,7 +666,7 @@ def main() -> int:
         lp = LOG_DIR / f"stock_download_{ts}_direct.jsonl"
         print(f"[direct] 处理 {len(codes)} 只 (start={args.start}, end={args.end})", flush=True)
         summary = run_codes(codes, args.start, args.end, not args.no_resume, lp, "direct",
-                            args.sleep, update=args.update)
+                            args.sleep, update=args.update, backfill_only=args.backfill_only)
         print(f"[direct] 完成: {summary}", flush=True)
         return 2 if summary.get("error", 0) else 0
 
@@ -505,7 +696,7 @@ def main() -> int:
     print("[2/3] 开始串行下载(可 Ctrl+C 中断, 重跑同命令续传)...", flush=True)
     t0 = time.time()
     summary = run_codes(codes, args.start, args.end, not args.no_resume, lp, "serial",
-                        args.sleep, update=args.update)
+                        args.sleep, update=args.update, backfill_only=args.backfill_only)
     print(f"[3/3] 完成, 耗时 {(time.time()-t0)/60:.1f} 分钟. 汇总: {summary}", flush=True)
     errs = summary.get("error", 0)
     if errs:
