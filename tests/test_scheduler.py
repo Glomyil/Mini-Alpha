@@ -89,8 +89,21 @@ check(len(lp) == 1 and fors and lp[0].lineno < min(n.lineno for n in fors),
 
 print("── B. 功能检查（真数据，约 15 秒）──")
 panels = load_panels()
-check(sorted(panels) == ["amount", "can_trade", "hfq_close", "hfq_open", "reason", "ret_1d_hfq"],
-      f"面板 6 张表（T-2.2 加了 reason）：{sorted(panels)}")
+# 2026-11-04（T-6.1）：面板从 6 张加到 8 张 —— float_mv（流通市值）与 industry（行业编号），
+#   都是为行业/市值中性化准备的原料。断言保持【精确集合】，不是只看数量。
+check(sorted(panels) == ["amount", "can_trade", "float_mv", "hfq_close", "hfq_open",
+                         "industry", "reason", "ret_1d_hfq"],
+      f"面板 8 张表（T-2.2 加 reason、T-6.1 加 float_mv/industry）：{sorted(panels)}")
+# 两张新表的 dtype 必须能被 to_numpy 直接吃（industry 是分类编号，float_mv 是价格×股数）
+check(str(panels["industry"].dtypes.iloc[0]) == "int16",
+      f"industry dtype 必须是 int16（实测 {panels['industry'].dtypes.iloc[0]}）")
+check(panels["industry"].shape == panels["hfq_close"].shape,
+      "industry 宽表必须与 hfq_close 同形")
+check(panels["float_mv"].shape == panels["hfq_close"].shape,
+      "float_mv 宽表必须与 hfq_close 同形")
+# float_mv 允许全 NaN（旧数据没有 turn 列），但不许有 inf —— 明天取 ln 时 inf 会炸
+_mv = panels["float_mv"].to_numpy()
+check(not np.isinf(_mv).any(), "float_mv 不许出现 inf（除零/溢出的产物）")
 # 2026-11-01 增量更新到 2026-10-29（+32 个交易日 + 补 63 只清单遗漏的票）
 check(panels["hfq_close"].shape == (2871, 5476), f"面板形状 {panels['hfq_close'].shape}")
 

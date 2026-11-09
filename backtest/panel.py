@@ -9,8 +9,14 @@ from data import loader
 from data.cleaner.base import PIPELINE_NAMES   # 只要一串环节名，不依赖整个清洗管线
 SRC = Path("data/storage/cleaner_daily")          # 净数据（已落盘，5,471 个长表）
 CACHE = Path("backtest/cache")
+IND_SRC = Path("data/storage/industry_snapshot")   # T-6.1：按调仓日的行业快照
+IND_MAP = Path("data/storage/industry_map.parquet")  # 行业字符串 → 稳定编号（跨重建不变）
+_MV_WARNED = [False]   # float_mv 缺失只警告一次（5476 只票别刷屏）
 FIELDS = ["hfq_close", "hfq_open", "ret_1d_hfq",
-          "can_trade", "amount", "reason"]  # 新增宽表名单
+          "can_trade", "amount", "reason",
+          # 2026-11-04（T-6.1）：中性化所需的两张原料表
+          "float_mv",   # 流通市值 = close(未复权) × volume/(turn/100)，由 cleaner/derived 产出
+          "industry"]   # 证监会行业编号（int16，0=未知），由 industry_snapshot 摊平而来
 _SELF = Path(__file__)                            # 判断"缓存是不是比这份代码新"
 
 
@@ -30,12 +36,81 @@ def _reason_of(no_susp, no_bad, has_px, lim_up, lim_dn):
     return r
 
 
+def _build_industry_wide(ref: pd.DataFrame):
+    """按日快照 → 面板宽表（int16 行业编号，0 = 未知）。没有快照返回 None。
+
+    为什么不能像其他表那样从每股 parquet 读：
+        行业快照是【每个调仓日一个文件】（data/storage/industry_snapshot/{date}.parquet），
+        不是每股一张时间序列。所以这里单独摊平。
+
+    语义
+        某个调仓日的快照，管到【下一个调仓日之前】的所有交易日 ⇒ 前向填充。
+
+    编号稳定性（重要）
+        行业字符串 → 编号必须【跨重建不变】，否则每次重建 id 都变，
+        缓存指纹失效、跨运行的对比也断了。所以映射存盘（IND_MAP），只追加不改号。
+
+    ⚠️ 实测依据（T-6.1 工单 §2.2）：24.1% 的股票行业变过，所以必须用【时点快照】，
+       绝不允许拿最新分类回填历史。
+    """
+    files = sorted(IND_SRC.glob("*.parquet")) if IND_SRC.exists() else []
+    if not files:
+        logger.warning(f"行业快照缺失（{IND_SRC} 为空）⇒ 面板不产出 industry 表；"
+                       f"中性化相关功能需等 ops/fetch_industry.py 跑完")
+        return None
+
+    # ① 读所有快照 → 行=快照日, 列=code, 值=行业字符串
+    frames = []
+    for f in files:
+        d = pd.read_parquet(f)
+        s = d.set_index("code")["industry"].rename(pd.Timestamp(f.stem))
+        frames.append(s)
+    long = pd.DataFrame(frames)
+
+    # ② 行业字符串 → 稳定编号（0 留给"未知"/空串）
+    idmap = {}
+    if IND_MAP.exists():
+        m = pd.read_parquet(IND_MAP)
+        idmap = {str(r["industry"]): int(r["id"]) for _, r in m.iterrows()}
+    seen = {v for v in long.to_numpy().ravel() if isinstance(v, str) and v}
+    new_vals = sorted(seen - set(idmap))
+    if new_vals:
+        nxt = (max(idmap.values()) + 1) if idmap else 1
+        for v in new_vals:
+            idmap[v] = nxt
+            nxt += 1
+        IND_MAP.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"industry": list(idmap), "id": list(idmap.values())}
+                     ).to_parquet(IND_MAP, index=False)
+
+    num = long.apply(lambda col: col.map(idmap).fillna(0).astype("int16"))
+    num = num.reindex(columns=ref.columns)          # 对齐面板列，缺的列→NaN→0
+
+    # ③ 对齐到交易日索引并前向填充：每个快照管到下一个快照之前
+    num.index = pd.DatetimeIndex(num.index)
+    out = num.reindex(ref.index, method="ffill").fillna(0).astype("int16")
+    n_unknown = int((out == 0).to_numpy().mean() * 10000) / 100
+    logger.info(f"industry 宽表: {out.shape} 行业数 {len(idmap)} 未知占比 {n_unknown:.2f}%")
+    return out
+
+
 def build_panels(files):
     print(f"  开始重建面板：{len(files):,} 只 × {len(FIELDS)} 张表，约 30–90 秒（别中断）…")
     # """读 cleaner_daily → 6 张宽表（不做清洗、不落盘）"""
-    c_l, o_l, r_l, t_l, a_l, rs_l = [], [], [], [], [], []  # 想新建宽表就自己往等式左边加列表名，右边加列表:[]
+    c_l, o_l, r_l, t_l, a_l, rs_l, mv_l = [], [], [], [], [], [], []  # 想新建宽表就自己往等式左边加列表名，右边加列表:[]
     for p in files:
         d = pd.read_parquet(p)
+        # float_mv 缺失 ⇒ 给 NaN 并大声警告一次。
+        #   为什么不 raise：中性化还没写（明天的活），现在报错会让整个测试套件红掉、
+        #   阻塞其他工作。真正该"硬失败"的地方是明天的 neutralize()（三条恒等式会抓住 NaN）。
+        #   但绝不许 fillna(0) —— 那会让"没数据"和"市值是 0"混成一件事。
+        if "float_mv" not in d.columns:
+            if not _MV_WARNED:
+                logger.warning(
+                    f"{p.name} 缺 float_mv 列 ⇒ 面板 float_mv 全 NaN。"
+                    f"旧数据（11 列）没有 turn，需用新 KLINE_FIELDS 全量重下（T-6.1 工单 §5）")
+                _MV_WARNED[0] = True
+            d = d.assign(float_mv=np.nan)
         idx = pd.DatetimeIndex(pd.to_datetime(d["date"]))
         # ① hfq_close：**直接读 adjust 的产物**（唯一产出者是清洗层，panel 不再算一遍）
         c_l.append(pd.Series(pd.to_numeric(d["hfq_close"], errors="coerce").to_numpy(),
@@ -46,6 +121,9 @@ def build_panels(files):
         # ③ ret_1d_hfq：也是直接读 derived 的产物
         r_l.append(pd.Series(pd.to_numeric(d["ret_1d_hfq"], errors="coerce").to_numpy(),
                              index=idx, name=p.stem))
+        # ④ float_mv：同样是直接读 cleaner/derived 的产物，panel 不再算一遍
+        mv_l.append(pd.Series(pd.to_numeric(d["float_mv"], errors="coerce").to_numpy(),
+                              index=idx, name=p.stem))
         # 五个输入各转一次 numpy，can_trade 和 reason 复用（别重复 to_numeric ✓）
         no_susp = pd.to_numeric(
             d["is_suspended"], errors="coerce").fillna(1).to_numpy() == 0
@@ -75,28 +153,49 @@ def build_panels(files):
         #   ③ return 字典里加一项，dtype 想清楚（⚠️ 要 fillna 的必须给 float，int 会拿 0 填缺失）
         #   ④ 最后别忘了把名字加进 FIELDS（否则缓存身份不变，不会重建）
 
+    _close_ref = pd.concat(c_l, axis=1).sort_index()
+
     # ★ 对齐后"未上市 / 已退市"的日期才第一次出现（长表里根本没有那一行）→ 那些格子是 NaN；
     #   bool 列一进 concat 会升成 object，此时 .astype(bool) 会把 NaN 变成 True（凭空可交易）
     #   → 用 .eq(True)：只有明确写着的 True 才算可交易
-    return {"hfq_close":  pd.concat(c_l, axis=1).sort_index().astype("float32"),
+    panels = {"hfq_close":  _close_ref.astype("float32"),
             "hfq_open":   pd.concat(o_l, axis=1).sort_index().astype("float32"),
             "ret_1d_hfq": pd.concat(r_l, axis=1).sort_index().astype("float32"),
             "amount":     pd.concat(a_l, axis=1).sort_index().astype("float32"),
             "can_trade":  pd.concat(t_l, axis=1).sort_index().eq(True),
             # reason：0=ok 1=停牌 2=涨停买不到 3=跌停卖不掉 4=不在市 5=有行无价
             # 没有这一格 ⇒ NaN ⇒ 4（不在市）。必须 fillna 后再 cast，否则留 NaN ✓
-            "reason":     pd.concat(rs_l, axis=1).sort_index().fillna(4).astype("int8")}
+            "reason":     pd.concat(rs_l, axis=1).sort_index().fillna(4).astype("int8"),
+            # 流通市值：NaN 必须留着（停牌/无 turn 日），不许 fillna(0) —— 明天取 ln 时才知道哪些要剔
+            "float_mv":   pd.concat(mv_l, axis=1).sort_index().astype("float32")}
+
+    # 行业宽表的数据源是【按日的调仓日快照】，不是每股 parquet ⇒ 单独摊平，
+    #   没有快照就跳过（T-6.1 是分步抓的，允许暂时缺失），只 warning 不报错。
+    ind = _build_industry_wide(_close_ref)
+    if ind is not None:
+        panels["industry"] = ind
+    return panels
 
     # 在返回的字典内新增与上述格式一致的宽表："指标名":     pd.concat(a_l, axis=1).sort_index().astype("float32"),
 
 
 def source_fingerprint(src=SRC):
-    """只用三样：文件数 / 最新 mtime / 总大小（对净数据目录 cleaner_daily 取）"""
+    """只用三样：文件数 / 最新 mtime / 总大小。
+
+    ⚠️ 2026-11-04（T-6.1）：行业宽表的原料【不在】cleaner_daily，而在 industry_snapshot。
+       如果不把它算进指纹，抓了新快照之后缓存不会失效 ⇒ 面板永远停在旧行业上 ✗
+    """
     files = sorted(src.glob("*.parquet"))
-    return {"files": len(files),
-            "max_mtime": time.strftime("%Y-%m-%d %H:%M:%S",
-                                       time.localtime(max(p.stat().st_mtime for p in files))),
-            "total_mb": round(sum(p.stat().st_size for p in files) / 2**20, 1)}
+    fp = {"files": len(files),
+          "max_mtime": time.strftime("%Y-%m-%d %H:%M:%S",
+                                     time.localtime(max(p.stat().st_mtime for p in files))),
+          "total_mb": round(sum(p.stat().st_size for p in files) / 2**20, 1)}
+    ind = sorted(IND_SRC.glob("*.parquet")) if IND_SRC.exists() else []
+    fp["ind_files"] = len(ind)
+    fp["ind_max_mtime"] = (time.strftime("%Y-%m-%d %H:%M:%S",
+                                         time.localtime(max(p.stat().st_mtime for p in ind)))
+                           if ind else "")
+    return fp
 
 
 def _materialize(panels: dict) -> dict:

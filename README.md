@@ -91,8 +91,8 @@ for ($i = 1; $i -le 20; $i++) {
 
 | 场景 | 耗时 | 说明 |
 | :-- | --: | :-- |
-| **全库清洗**（5,471 只） | **159–233 s** | 一次读 5,471 个 parquet，写净数据 727 MB |
-| **面板重建**（首次 / `panel.py` 改过） | **30–90 s** | 读净数据 → 拼 5 张宽表（2,839 × 5,471） |
+| **全库清洗**（5,476 只） | **159–233 s** | 一次读 5,476 个 parquet，写净数据 727 MB |
+| **面板重建**（首次 / `panel.py` 改过） | **30–90 s** | 读净数据 → 拼 8 张宽表（2,871 × 5,476） |
 | **面板命中** | **~1.3 s** | 绝大多数运行都是这个 |
 | **单因子回测**（含报告与图） | **~2.5 s** | 分层 → 权重 → 引擎 → IC → 报告 |
 | **6 因子全跑**（命中） | **~16 s** | 就是 `python main.py` 的日常耗时 |
@@ -178,13 +178,16 @@ FEATURES = {..., "amt_trend": amt_trend}     # 挂进注册表
 ## 5. 目录与数据流（方便你快速理解代码的架构）：
 
 ```
-data/storage/stock_daily/        原始 parquet（5,471 只，含退市）
+data/storage/stock_daily/        原始 parquet（5,476 只，含退市）
       │  data/cleaner/*  5 个环节：align → suspension → price → adjust → derived
       ▼
-data/storage/cleaner_daily/      净数据（20 列 / 727 MB）——「原料」
+data/storage/cleaner_daily/      净数据（23 列 / 727 MB）——「原料」
       │  backtest/panel.py       把列搬成宽表（FIELDS）
       ▼
-宽表 5 张（2,839 交易日 × 5,471 只）—— hfq_close / hfq_open / ret_1d_hfq / can_trade / amount
+宽表 8 张（2,871 交易日 × 5,476 只）
+     hfq_close / hfq_open / ret_1d_hfq / amount    ← 价格与成交
+     can_trade / reason                            ← 能不能买 / 为什么不能
+     float_mv / industry                           ← T-6.1 新增：流通市值、行业编号
       │  backtest/features.py    在宽表上算「指标」（vol / ma_dev / amihud …）
       ▼
 指标表 → backtest/factors.py 声明（needs / requires / fn / sign）→ 因子值

@@ -65,7 +65,10 @@ print("\n── ② 主路径 ──")
 df = load_one("sh.600000", "2020-01-01", "2020-12-31")
 check(df is not None, "返回 DataFrame（不是 None）")
 if df is not None:
-    check_eq(df.shape, (243, 11), "shape")
+    # 2026-11-04（T-6.1）：抓取层加了 turn 列 ⇒ 11 → 12
+    #   （10 个 KLINE 字段 + turn + back_adj_factor；turn 是流通市值的原料）
+    check_eq(df.shape, (243, 12), "shape")
+    check("turn" in df.columns, "turn 列存在（T-6.1：流通市值 = close × volume/(turn/100)）")
     check(all(c in df.columns for c in REQUIRED), f"必需列齐全 {REQUIRED}")
     check(list(df.index) == list(range(len(df))), "索引从 0 连续（reset_index 生效）")
 

@@ -36,6 +36,8 @@ COLUMN_WHITELIST = {  # 在进行数据清洗时有时候会计算出新的指�
     "flag_open_limit_up":   "涨跌停环节加：开盘即涨停=1（买不到）",
     "flag_open_limit_down": "涨跌停环节加：开盘即跌停=1（卖不掉）",
     "flag_new_listing":     "涨跌停环节加：处于新股无涨跌幅期=1",
+    "turn":     "抓取层新增：换手率（百分数，如 0.1234 表示 0.1234%）",
+    "float_mv": "派生环节加：流通市值 = close(未复权) × volume/(turn/100)",
 }
 
 

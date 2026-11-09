@@ -30,7 +30,9 @@ def run(df: pd.DataFrame, params: dict, ctx: dict) -> pd.DataFrame:
     out = out.sort_values("date")
 
     # ⑤ 数值列类型修正：只转类型，绝不 fillna（缺值留给下游环节处理）
-    for col in ["open", "high", "low", "close", "volume", "amount"]:
+    # turn（换手率）必须在这里转成数值：抓取层落盘时它是 object（字符串），
+    # 不转的话会以 object 一路往下流，某处 to_numeric 后静默变 NaN → 市值全 NaN。
+    for col in ["open", "high", "low", "close", "volume", "amount", "turn"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
