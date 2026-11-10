@@ -65,13 +65,18 @@ def test_amihud_layer4_annualized_is_pinned():
     nav, panels, rdates = _nav_for("amihud_20d")
 
     # 先钉住形状：形状变了说明数据换了，下面的年化也就不可比了
-    assert panels["hfq_close"].shape == (2871, 5476), (
+    #
+    # 2026-11-09 数据更新：股票清单从 5476 → 5477（多一只新上市），
+    #   实测影响：层4 年化 13.44% → 13.46%、超额 5.98% → 6.00%（都 +0.02pp），
+    #   基准年化 7.46% 不变、调仓期数 130 不变。
+    #   ⇒ 按本测试的要求"重新钉数"而不是放宽容差：下面两个数已钉到新实测值。
+    assert panels["hfq_close"].shape == (2871, 5477), (
         f"面板形状变了（{panels['hfq_close'].shape}）—— 数据更新过？"
         "那时要重新钉下面每一个数，而不是放宽断言")
     assert len(rdates) == 130, f"调仓期数变了（{len(rdates)}），原为 130"
 
     got = float(ann_return(nav[4]))
-    assert got == pytest.approx(0.1344, abs=5e-4), (
+    assert got == pytest.approx(0.1346, abs=5e-4), (
         f"层4 年化 {got:.4%} != 13.44% —— 改动动到了主路径，或数据换了")
 
 
@@ -86,5 +91,5 @@ def test_amihud_layer4_excess_is_pinned():
     bench = equal_weight_nav(panels).loc[rdates[0]:]
 
     excess = float(ann_return(nav[4]) - ann_return(bench))
-    assert excess == pytest.approx(0.0598, abs=5e-4), (
+    assert excess == pytest.approx(0.0600, abs=5e-4), (
         f"层4 超额 {excess:.4%} != +5.98%")

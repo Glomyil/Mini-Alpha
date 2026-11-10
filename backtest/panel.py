@@ -174,6 +174,30 @@ def build_panels(files):
     ind = _build_industry_wide(_close_ref)
     if ind is not None:
         panels["industry"] = ind
+
+    # ── 尾部护栏：裁掉"可交易只数崩塌"的末尾若干天 ──
+    #   为什么会塌：补字段（--backfill-only）沿用每只票【原有】的日期范围，
+    #   所以大多数票停在同一个末日；但只要有几只票被整段重下过（或新数据只到部分票），
+    #   面板的交易日索引就会被那几只拉到更晚 ⇒ 那几天全市场只剩个位数可交易
+    #   ⇒ 分层为空 ⇒ 引擎的"W 行和必须 ≈1"护栏直接拒跑（实测：2026-11-02..11-09 只剩 3~4 只）
+    #
+    #   ⇒ 主动裁掉，别让坏尾巴流到引擎。只裁【连续尾部】，中间的空洞不动。
+    #   下限用【相对值】（最大可交易只数的 5%，至少 1 只）而不是绝对数：
+    #   测试 fixture 只有 3 只票，绝对下限 50 会把每一天都判死 ⇒ np.max 空数组崩。
+    _n_tr = panels["can_trade"].sum(axis=1)
+    _floor = max(1, int(_n_tr.max() * 0.05))
+    _ok = (_n_tr >= _floor).to_numpy()
+    _idx = np.nonzero(_ok)[0]
+    if _idx.size == 0:
+        logger.warning("面板每一天的可交易只数都低于护栏下限 ⇒ 不裁剪（数据太稀疏，检查一遍）")
+    elif int(_idx[-1]) < len(_ok) - 1:
+        _last = int(_idx[-1])                            # 最后一个"像样"的交易日
+        _cut = panels["hfq_close"].index[_last + 1:]
+        logger.warning(
+            f"面板裁掉尾部 {len(_cut)} 天（可交易只数 < {_floor}，最后塌陷到 "
+            f"{int(_n_tr.iloc[-1])} 只）: {str(_cut[0])[:10]} ~ {str(_cut[-1])[:10]} "
+            f"⇒ 保留到 {str(panels['hfq_close'].index[_last])[:10]}")
+        panels = {k: v.loc[:panels["hfq_close"].index[_last]] for k, v in panels.items()}
     return panels
 
     # 在返回的字典内新增与上述格式一致的宽表："指标名":     pd.concat(a_l, axis=1).sort_index().astype("float32"),

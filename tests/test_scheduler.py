@@ -105,7 +105,10 @@ check(panels["float_mv"].shape == panels["hfq_close"].shape,
 _mv = panels["float_mv"].to_numpy()
 check(not np.isinf(_mv).any(), "float_mv 不许出现 inf（除零/溢出的产物）")
 # 2026-11-01 增量更新到 2026-10-29（+32 个交易日 + 补 63 只清单遗漏的票）
-check(panels["hfq_close"].shape == (2871, 5476), f"面板形状 {panels['hfq_close'].shape}")
+# 2026-11-09 数据更新：清单 5476 → 5477（多一只新上市）；交易日仍 2871
+#   面板尾部多了 7 天"可交易只数崩塌"（2026-10-30 ~ 11-09 只剩 3~4 只），
+#   已被 backtest/panel.py 的尾部护栏裁掉 ⇒ 末日仍是 2026-10-29
+check(panels["hfq_close"].shape == (2871, 5477), f"面板形状 {panels['hfq_close'].shape}")
 
 # 2026-11-03：rebalance_dates 的 rule 改成必传（PITFALLS #19：默认值藏口径）。
 # 这里显式写 "ME"，和下面 check(len(rdates) == 130) 的期望值配套。
@@ -125,8 +128,8 @@ check([t for t in FACTORS["amihud_20d"].get("requires", []) if t not in panels_n
 
 W, layers = weights_for_factor(FACTOR, panels, rdates)
 check(isinstance(W, list) and len(W) == 5, f"W 是 list[5]（实测 {type(W).__name__}/{len(W)}）")
-# 同上：多一期 + 多 5 只票
-check(layers.shape == (130, 5476), f"layers 形状 {layers.shape}")
+# 同上：多一期 + 多 5 只票；2026-11-09 清单 5476 → 5477（多一只新上市）
+check(layers.shape == (130, 5477), f"layers 形状 {layers.shape}")
 rowsum = np.round(W[0].sum(axis=1).to_numpy(), 6)
 check(bool(np.isin(rowsum, [0.0, 1.0]).all()), "W 每行权重和 ∈ {0.0, 1.0}（满仓或空层）")
 check(int(layers.to_numpy().min()) == -1 and int(layers.to_numpy().max()) == 4,

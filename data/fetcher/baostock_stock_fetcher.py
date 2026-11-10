@@ -309,15 +309,22 @@ def backfill_one(bs: Any, code: str, target: Path, missing: List[str]) -> Dict[s
     out = existing.assign(_d=d.to_numpy()).merge(add, on="_d", how="left")
     out = out.drop(columns=["_d"]).sort_values("date").reset_index(drop=True)
 
-    got = [c for c in missing if c in out.columns and out[c].notna().any()]
+    # ⚠️「整列全是 NaN」也要写进去 —— 否则这条永远补不完：
+    #   实测 sh.601268 全程停牌（volume=0），baostock 的 turn 全是空串
+    #   ⇒ 没有换手率就算不出流通股本 ⇒ NaN 就是【正确答案】，不是失败
+    #   如果不写，schema 永远缺 turn ⇒ 以后每次运行都把它当"洞"重试，永远补不完 ✗
+    got = [c for c in missing if c in out.columns]
     still = [c for c in missing if c not in got]
     if still:
-        return {"code": code, "status": "backfill_partial", "missing": still}
+        return {"code": code, "status": "backfill_missing", "missing": still}
 
+    all_nan = [c for c in got if not out[c].notna().any()]
     tmp = target.with_suffix(".parquet.tmp")
     out.to_parquet(tmp, compression=PARQUET_COMPRESSION)
     tmp.replace(target)
-    return {"code": code, "status": "backfilled", "fields": got, "rows": len(out)}
+    return {"code": code,
+            "status": "backfilled_nan" if all_nan else "backfilled",
+            "fields": got, "rows": len(out), "all_nan_fields": all_nan}
 
 
 def _merge_new_rows(existing: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:

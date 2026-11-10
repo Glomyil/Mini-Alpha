@@ -30,7 +30,7 @@ from loguru import logger
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data" / "storage" / "stock_daily"
 LOGS = ROOT / "data" / "logs" / "backfill_all"
-MAX_RESTART = 3          # 同一段最多重启几次，防止死循环
+MAX_RESTART = 10         # 同一段最多重启几次（重启很便宜，别轻易放弃）
 POLL_S = 20              # 每多少秒打一行进度
 
 
@@ -103,6 +103,10 @@ def main() -> None:
             for it in procs:
                 idx, p, out, rs, off, cnt = it
                 if p.poll() is None:
+                    continue
+                if p.returncode == 0:
+                    # 正常跑完（code=0），不该重启 —— 之前漏了这个判断，
+                    # 导致跑完的分片被反复拉起（日志里满屏"退出(code=0)，第 N 次重启"）
                     continue
                 if rs >= MAX_RESTART:
                     logger.error(f"分片 {idx} 已重启 {rs} 次仍失败，放弃（offset {off}）")
