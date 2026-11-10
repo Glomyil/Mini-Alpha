@@ -17,7 +17,11 @@ def test_main_slices_nav_before_report():
     assert m, "main.py 里找不到 .loc[rdates[0]:] —— T-1.1 的切片被删了？"
 
     i_slice = m.start()
-    i_report = src.find("build_report")
+    # 2026-11-10（T-6.2）：锚点从 "build_report" 收紧成 "RP.build_report("。
+    # 原因：str.find 会命中【注释里的同名词】—— 中性化注释里提到 build_report，
+    # 就骗过了守卫（实测 i_report 落到 3328 的注释上，真调用在 7554）。
+    # 加 RP. 前缀和左括号之后，只有真调用能命中 ⇒ 这是【加强】不是放宽。
+    i_report = src.find("RP.build_report(")
     # 2026-11-03：哨兵从「累计换手 < 20」改成「年化换手 < 0.7」，文案改过两次。
     # 所以锚点不再盯报错文案，改盯哨兵的【常量名】_MIN_TV_PER_YEAR ——
     # 文案随时会调，常量是这个哨兵的身份。

@@ -19,6 +19,14 @@ OUT = Path(__file__).resolve().parent.parent / "reports"
 
 def md_table(df: pd.DataFrame, index_name: str = "层",
              pct_cols=("年化", "波动", "最大回撤", "基准年化", "超额")) -> str:
+    """DataFrame → markdown 表。
+
+    ⚠️ 整数列必须【按列的 dtype】判断，不能看行里的值：
+       iterrows() 会把整行升成 float64（哪怕原列是 int64）
+       ⇒ 期数 50 → 50.0 ⇒ isinstance(v, float) 为真 ⇒ 印成 "50.0000"
+       实测：§3 年度 IC 的「期数」就是这么被印成 50.0000 的。
+    """
+    int_cols = {str(c) for c in df.columns if pd.api.types.is_integer_dtype(df[c])}
     cols = [index_name]+[str(c)for c in df.columns]
     head = "|"+"|".join(cols)+"|"
     sep = "|"+"|".join(":--"for _ in cols)+"|"
@@ -27,8 +35,11 @@ def md_table(df: pd.DataFrame, index_name: str = "层",
         cells = [str(idx)]
         for c in df.columns:
             v = row[c]
-            if isinstance(v, float):
-                cells.append(f"{v:.2%}" if c in pct_cols else f"{v:.4f}")
+            cs = str(c)
+            if cs in int_cols and pd.notna(v):
+                cells.append(str(int(round(float(v)))))
+            elif isinstance(v, float):
+                cells.append(f"{v:.2%}" if cs in pct_cols else f"{v:.4f}")
             else:
                 cells.append(str(v))
         body.append("| " + " | ".join(cells) + " |")
@@ -50,6 +61,9 @@ def banner(meta: dict) -> str:
         f"> - 年化常数：**{meta['trading_days']}** 交易日/年（A 股；252 是美股）｜ IC-IR 用 {meta['periods_per_year']} 期/年",
         f"> - 成本：佣金 {meta['fee_buy']}/{meta['fee_sell']} ｜ 滑点 {meta['slippage']}（单边）｜ 无整手",
         f"> - 多空：**标准复利 ∏(1+r₄−r₀)**（主）· 层差 pp · 扣融券净额 —— 多空是**纯度诊断**，不是可执行策略",
+        # 中性化必须印出【实际暴露项 + 尺度】，不能只印「开/关」、更不能写死字符串 ——
+        # 否则不同 exposures 的报告长得一模一样，banner 就成了假的（实测踩过）
+        f"> - 中性化：**{('暴露=' + ','.join(meta['neutralize_exposures']) + ' | 横截面秩') if meta['neutralize'] else '关'}**",
         f"> - 生成时间：{meta['stamp']}",
     ])
 
@@ -168,6 +182,11 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             "fee_buy": spec.fee_buy if spec else 0.00025,
             "fee_sell": spec.fee_sell if spec else 0.00075,
             "slippage": spec.slippage if spec else 0.0005,
+            # 中性化（T-6.2）：不传 spec 时给 False，不猜"开着"（PITFALLS #19 同一原则）
+            "neutralize": bool(spec.neutralize) if spec else False,
+            # 实际剥了哪几项必须来自 spec —— 写死字符串会让 banner 撒谎
+            #（实测：只剥行业那份报告也印「行业+ln(流通市值)」）
+            "neutralize_exposures": tuple(spec.neutralize_exposures) if spec else (),
             "stamp": stamp}
 
     parts = [f"# 因子回测报告 · `{factor}`", "", banner(meta), ""]
@@ -217,8 +236,10 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             parts += ["## 2. 分段对比", "",
                       f"> 分界点：`{split}`（来自 application.yml 的 research.split）", "",
                       md_table(seg.set_index("段"), index_name="段",
-                               pct_cols=("层0年化", "层0超额",
-                                         "层4年化", "层4超额")), ""]
+                               # 动态取：segment_table 可能给首层+末层(0/9)、也可能给 0/4，
+                               # 写死 (层0,层4) 会让层9 掉到 .4f 分支 ⇒ 同一行里 % 和小数混用
+                               pct_cols=tuple(c for c in seg.columns
+                                              if str(c).endswith("年化") or str(c).endswith("超额"))), ""]
     else:
         logger.info(f"{factor} 分段跳过：split 为空（不分段模式）")
 
@@ -228,7 +249,9 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
         yic = yearly_ic_table(ic)
         parts += ["## 3. 年度 IC（标签 = 下一个调仓日的区间收益）", "",
                   md_table(yic, index_name="年",
-                           pct_cols=("IC均值", "IC胜率")), ""]
+                           # IC 是相关系数，不是收益率 ⇒ 统一用小数（0.0836），
+                           # 和 §4 的「IC 均值 0.0399」同一单位；印成 8.36% 会和收益混淆
+                           pct_cols=("IC胜率",)), ""]
     if ic_sum is not None:
         # IC>0 胜率：只有均值会飘（几期大值就能撑起来），胜率才说明方向稳不稳。
         # 有效期数为 0 时 ic_pos_rate 是 NaN ⇒ 印 nan，不许崩（报告不该因 NaN 挂掉）。
@@ -240,7 +263,10 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
                         f"（{ic_sum['n_pos']} / {ic_sum['n']} 期为正）")
         logger.info(f"ic 有效:{ic_sum['n']} 无效:{ic_sum.get('n_bad', 0)} "
                     f"mean:{ic_sum['ic_mean']:.4f} ir:{ic_sum['ic_ir']:.4f}")
-        parts += ["## 4. IC（标签 = 下一个调仓日的区间收益）", "",
+        # 中性化开启时必须标注，否则读者会以为这是 raw 因子的 IC（口径②：缺一项就算没做这一格）
+        _ic_title = ("## 4. IC（中性化后 · 标签 = 下一个调仓日的区间收益）"
+                     if meta["neutralize"] else "## 4. IC（标签 = 下一个调仓日的区间收益）")
+        parts += [_ic_title, "",
                   f"- IC 均值 **{ic_sum['ic_mean']:.4f}** ｜ 标准差 {ic_sum['ic_std']:.4f} "
                   f"｜ **IC-IR {ic_sum['ic_ir']:.4f}** ｜ 期数 {ic_sum['n']}",
                   _pos_txt,

@@ -16,6 +16,12 @@ FEE_BUY = 0.00025
 FEE_SELL = 0.00075
 SLIPPAGE = 0.0005
 N_LAYER = 5
+NEUTRALIZE_ENABLED = False
+NEUTRALIZE_EXPOSURES = ("industry", "ln_float_mv")
+NEUTRALIZE_MV_FLOOR = 0.0
+NEUTRALIZE_WEIGHT = None
+NEUTRALIZE_DROP_FIRST = True
+KNOWN_EXPOSURES = frozenset({"industry", "ln_float_mv"})
 
 
 @dataclass(frozen=True)
@@ -35,10 +41,15 @@ class RunSpec:
     universe: str
     limit_strict: bool
     cfg_hash: str
+    neutralize: bool
+    neutralize_exposures: tuple
+    neutralize_mv_floor: float
+    neutralize_weight: object        # None 或 "float_mv"
+    neutralize_drop_first: bool
     cfg_mtime:  str
 
     def fingerprint(self) -> str:
-        return "|".join([
+        parts = [
             f"since={self.since}",
             f"until={self.until}",
             f"split={self.split}",
@@ -51,12 +62,29 @@ class RunSpec:
             f"trading_days={self.trading_days}",
             f"periods_per_year={self.periods_per_year}",
             f"init_cash={self.init_cash}",
-        ])
+        ]
+        if self.neutralize:
+            parts += [
+                "neut=1",
+                f"neut_exp={','.join(self.neutralize_exposures)}",
+                f"neut_mv_floor={self.neutralize_mv_floor}",
+                f"neut_w={self.neutralize_weight}",
+                f"neut_drop_first={int(self.neutralize_drop_first)}",
+            ]
+        return "|".join(parts)
 
     def banner(self) -> str:
         return (f"spec:{self.cfg_hash} 区间:{self.since}+ 到 {self.until} "
                 f"费率:{self.fee_buy:.5f}/{self.fee_sell:.5f} 滑点:{self.slippage:.4f} "
-                f"层数:{self.n_layers} 年化:{self.trading_days}d universe:{self.universe}")
+                f"层数:{self.n_layers} 年化:{self.trading_days}d universe:{self.universe} "
+                # ⚠️ 这里必须是 【字符串 + (三元表达式)】，不能把三元放最后：
+                #    if/else 的优先级【低于】隐式字符串拼接 ⇒
+                #    写成 "...{universe}" f"中性化..." if X else "中性化:关"
+                #    实际等于 (整串) if X else "中性化:关"
+                #    ⇒ 关闭时 banner 只剩 "中性化:关"，spec hash / 频率 / 费率 全丢
+                + (f"中性化:开 暴露:{','.join(self.neutralize_exposures)}"
+                   f" 尺度:秩 加权:{self.neutralize_weight or '等权'}"
+                   if self.neutralize else "中性化:关"))
 
 
 def _yaml_mtime() -> str:
@@ -69,7 +97,7 @@ def _yaml_mtime() -> str:
 # research 节允许出现的键。多一个就算配置写错了（见 _check_research_keys）
 _RESEARCH_KEYS = frozenset({
     "since", "split", "fee_buy", "fee_sell", "slippage",
-    "n_layers", "trading_days", "init_cash", "freq", "borrow_cost",
+    "n_layers", "trading_days", "init_cash", "freq", "borrow_cost", "neutralize",
 })
 # 注意 periods_per_year 【不在此列】：它由 freq 推出，yml 里不该出现。
 # 真写了 ⇒ _check_research_keys 会报「未知键」，强制你去删掉它而不是让它静默覆盖映射表。
@@ -125,6 +153,33 @@ def _check_research_keys(config) -> None:
             f"可用的是：{sorted(_RESEARCH_KEYS)}")
 
 
+_NEUTRALIZE_KEYS = frozenset({"enabled", "exposures", "mv_floor",
+                              "weight", "drop_first"})
+
+
+def _check_neutralize_keys(config) -> None:
+    # research.neutralize 下出现未知键 ⇒ 报错。
+    # 不加这条：把 exposures 拼成 exposure、weight 拼成 wieght 时，
+    # config.get 会静默回落默认值 ⇒ 你以为改了配置其实没改 ⇒ 结论全错。
+    raw = (config.get("research") or {}).get("neutralize")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise KeyError(
+            f"research.neutralize 必须是键值对，实际是 {type(raw).__name__}")
+    unknown = set(raw) - _NEUTRALIZE_KEYS
+    if unknown:
+        raise KeyError(
+            f"research.neutralize 有未知键：{sorted(unknown)}；"
+            f"可用的是：{sorted(_NEUTRALIZE_KEYS)}")
+    # enabled 必须是真布尔：yml 写 enabled: yes 会被 YAML 解析成 True ✓，
+    # 但写 enabled: "yes" 是字符串 —— bool("yes") 也是 True，会静默当已开启。
+    if "enabled" in raw and not isinstance(raw["enabled"], bool):
+        raise KeyError(
+            f"research.neutralize.enabled 必须是 true/false，"
+            f"实际是 {type(raw['enabled']).__name__}: {raw['enabled']!r}")
+
+
 def load_spec(since: int | None = None, until: str = "-", **override) -> RunSpec:
     """读一次配置并冻结成 RunSpec。override 仅供测试注入。
 
@@ -137,6 +192,7 @@ def load_spec(since: int | None = None, until: str = "-", **override) -> RunSpec
     from config.config_manager import config
 
     _check_research_keys(config)
+    _check_neutralize_keys(config)
 
     def _g(key, default):
         v = config.get("research." + key, None)
@@ -158,8 +214,33 @@ def load_spec(since: int | None = None, until: str = "-", **override) -> RunSpec
         init_cash=_g("init_cash", INIT_CASH),
         universe="all",
         limit_strict=False,
+        neutralize=bool(_g("neutralize.enabled", NEUTRALIZE_ENABLED)),
+        neutralize_exposures=tuple(
+            _g("neutralize.exposures", NEUTRALIZE_EXPOSURES)),
+        neutralize_mv_floor=float(
+            _g("neutralize.mv_floor", NEUTRALIZE_MV_FLOOR)),
+        neutralize_weight=_g("neutralize.weight", NEUTRALIZE_WEIGHT),
+        neutralize_drop_first=bool(
+            _g("neutralize.drop_first", NEUTRALIZE_DROP_FIRST)),
     )
     vals.update(override)          # ★ 先合并 override，再推 freq / N
+
+    _bad = [e for e in vals["neutralize_exposures"]
+            if e not in KNOWN_EXPOSURES]
+    if _bad:
+        raise ValueError(
+            f"neutralize.exposures 含未知项 {_bad}；可用：{sorted(KNOWN_EXPOSURES)}")
+    if vals["neutralize_weight"] not in (None, "float_mv"):
+        raise ValueError(
+            f"neutralize.weight 只能是 null 或 float_mv，实际 {vals['neutralize_weight']!r}")
+    if vals["neutralize_mv_floor"] < 0:
+        raise ValueError(
+            f"neutralize.mv_floor 不能为负，实际 {vals['neutralize_mv_floor']}")
+    # 开了中性化却一项都不剥 = 只减横截面均值，不是中性化 ⇒ 在【配置期】就拒，别等跑完才发现
+    if vals["neutralize"] and not vals["neutralize_exposures"]:
+        raise ValueError(
+            "neutralize.enabled=true 但 exposures 为空；"
+            "要「不剥」请把 enabled 设为 false")
 
     # ★ freq 是唯一源头，N 由它推。两条硬约束：
     #   ① freq 和 periods_per_year 都【不在】上面的初始 vals 里、也【不从 yml 读】——
@@ -177,7 +258,8 @@ def load_spec(since: int | None = None, until: str = "-", **override) -> RunSpec
     # N 只认 override 显式给的，否则由 freq 推。用 is None 判，不用 or ——
     # or 会把 0 / "" 这类显式传值静默换成默认（PITFALLS #19 的精神：显式或无，没有"falsy"）。
     _n = vals.get("periods_per_year")
-    vals["periods_per_year"] = int(_PERIODS_PER_YEAR[_freq] if _n is None else _n)
+    vals["periods_per_year"] = int(
+        _PERIODS_PER_YEAR[_freq] if _n is None else _n)
     mtime = _yaml_mtime()
     probe = RunSpec(**vals, cfg_hash="-", cfg_mtime=mtime)
     digest = hashlib.sha256(

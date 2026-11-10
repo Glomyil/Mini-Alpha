@@ -25,8 +25,10 @@ from backtest.weights import build_target_weights, weights_for_factor
 from backtest.engine import run_all_layers, nav_frame
 from backtest.factors import FACTORS
 from backtest import report as RP
+from backtest.neutralize import neutralize
 from loguru import logger
 from config.research_spec import load_spec, save_snapshot
+
 
 OUT = Path(__file__).resolve().parent/"reports"
 
@@ -37,7 +39,8 @@ LOG_PATH = Path(__file__).resolve().parent / "logs" / "run.log"
 def init_log() -> None:
     """把每次运行的关键数字追加进 logs/run.log —— 见 教学文档/日志教学参考.md。
 
-    固定格式：时间 | 因子 | 层0换手 | 层4换手 | 多空 | IC | n（便于两行并排比对）。
+    固定格式：时间 | 因子 | 层0换手 | 末层换手 | 多空 | IC | n（便于两行并排比对）。
+    末层的层号随 n_layers 变（5 层→层4、10 层→层9），所以标签写"层号"而不是写死"层4"。
     enqueue=True 是异步写（不拖慢大计算）；个别受限环境不能建命名管道时退回同步写 ——
     **日志绝不能让主流程失败**。
     """
@@ -80,8 +83,22 @@ def main():
             continue
         _spec = FACTORS[name]
         _fval = _spec["fn"](build_features(panels, [name]), {}) * _spec["sign"]
+
+        # 中性化（T-6.2）必须在这里 —— 在 build_target_weights 和 build_report【之前】：
+        #   _fval 是唯一的因子值来源，它同时流向 ①权重 ②报告（报告内部调 rank_ic）。
+        #   在这一行改，两者一起吃；
+        #   若插在权重算完【之后】，权重仍是 raw 的、只有报告被中性化
+        #   ⇒ 报告说「中性化后 IC 更高」但净值/分层根本没变，自相矛盾 ✗
+        if spec.neutralize:
+            _fval = neutralize(_fval, panels, rdates,
+                               exposures=spec.neutralize_exposures,
+                               mv_floor=spec.neutralize_mv_floor,
+                               weight=spec.neutralize_weight,
+                               drop_first=spec.neutralize_drop_first)
+
         W, _ = build_target_weights(
             _fval, rdates, panels["can_trade"], n_layers=spec.n_layers)
+
         res = run_all_layers(W, panels, rdates,
                              fee_buy=spec.fee_buy, fee_sell=spec.fee_sell,
                              slippage=spec.slippage, init_cash=spec.init_cash)
@@ -155,8 +172,11 @@ def main():
                               res, outdir=OUT, factor_val=_fval, split=spec.split, spec=spec)
 
         tv = [float(res[k]["turnover"].sum()) for k in range(len(res))]
+        # 层号跟着 n_layers 走：原来写死"层4"，10 层时它其实是层9，日志会撒谎
+        # （同类前车之鉴：报告 banner 曾把"月频"写死，改周频后印出"月频 553 期"）
+        _last = len(res) - 1
         logger.info(f"{name} | 区间 {_nav.index[0].date()} | 层0换手 {tv[0]:.4f} "
-                    f"| 层4换手 {tv[-1]:.4f} | 多空净 {out['ls']['多空净年化']:.4f} "
+                    f"| 层{_last}换手 {tv[-1]:.4f} | 多空净 {out['ls']['多空净年化']:.4f} "
                     f"| IC {out['ic_summary']['ic_mean']:.4f} "
                     f"| ICvalid {out['ic_summary']['n']} ICbad {out['ic_summary']['n_bad']}")
 

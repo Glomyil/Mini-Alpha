@@ -35,11 +35,20 @@ FIELDS = ["since", "until", "split", "freq", "borrow_cost",
 
 # ── T1 指纹的格式是契约 ────────────────────────────────────
 def test_fingerprint_has_twelve_ordered_fields():
-    fp = R.load_spec(**SPEC_A).fingerprint()
+    # 2026-11-10（T-6.2）：enabled 现在会被 yml 打开（跑对照实验就要切），
+    # 所以两态都必须显式传 —— 否则测试结果取决于配置文件里的那个开关，
+    # 与本文件 SPEC_A 注释的原则一致：「不传就会被 yml 盖住，不是测试该有的样子」。
+    fp = R.load_spec(**SPEC_A, neutralize=False).fingerprint()
     parts = fp.split("|")
-    assert len(parts) == 12, "指纹应被 | 分成 12 段，实际 %r" % fp
+    assert len(parts) == 12, "关闭中性化时指纹应 12 段，实际 %r" % fp
     names = [p.split("=", 1)[0] for p in parts]
     assert names == FIELDS, "字段顺序变了：%r" % names
+
+    # 开启时 = 12 + 5 段；且【前 12 段一个字都不能变】——
+    # 这是"历史台账继续可比"的唯一保证，动了就等于所有旧 cfg_hash 失效。
+    parts_on = R.load_spec(**SPEC_A, neutralize=True).fingerprint().split("|")
+    assert len(parts_on) == 17, "开启中性化时应 17 段，实际 %r" % parts_on
+    assert parts_on[:12] == parts, "开启中性化不许动前 12 段（否则历史 cfg_hash 全失效）"
 
 
 def test_fingerprint_values_are_not_glued_together():

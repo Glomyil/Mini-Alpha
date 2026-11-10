@@ -68,8 +68,20 @@ print("── ② banner：口径声明必须齐全 ──")
 meta = {"factor": "rev_20d", "start": idx[0].date(), "end": idx[-1].date(), "n_rdate": len(rdates),
         "trading_days": 244, "periods_per_year": 12, "val_basis": "close",
         "freq": "ME", "universe": "all",
-        "fee_buy": 0.00025, "fee_sell": 0.00075, "slippage": 0.0005, "stamp": "20261012"}
+        "fee_buy": 0.00025, "fee_sell": 0.00075, "slippage": 0.0005, "stamp": "20261012",
+        # 2026-11-10（T-6.2）：banner 新增中性化口径行。硬索引 ⇒ 这里必须给键
+        "neutralize": False, "neutralize_exposures": ()}
 bn = RP.banner(meta)
+# 2026-11-10（T-6.2）：中性化口径必须出现在 banner 里，且能区分开/关
+check("中性化：**关**" in bn, "关闭时 banner 印「中性化：关」")
+_bnN = RP.banner(dict(meta, neutralize=True,
+                      neutralize_exposures=("industry", "ln_float_mv")))
+check("横截面秩" in _bnN and "ln_float_mv" in _bnN,
+      "开启时 banner 印出【暴露项 + 尺度】（否则两套配置的报告长得一样）")
+# 只剥一项时 banner 不许印成"两个都剥" —— 写死字符串会让 banner 撒谎（实测踩过）
+_bnOne = RP.banner(dict(meta, neutralize=True, neutralize_exposures=("industry",)))
+check("ln_float_mv" not in _bnOne and "industry" in _bnOne,
+      "只剥行业时 banner 不许把市值也印出来")
 # 2026-11-03：多空口径改了（比值法/日差法/月差法 → 标准复利 + 层差 pp + 扣融券净额）。
 # 这里换成新口径的稳定标记 —— 不再断言已删除的三种旧算法名。
 for token in ("244", "T+1 开盘", "close", "滑点", "标准复利", "纯度诊断"):
@@ -213,6 +225,10 @@ class _FakeSpec:
         self.slippage = 0.0005
         self.borrow_cost = 0.08
         self.universe = "all"
+        # 2026-11-10（T-6.2）：RunSpec 加了中性化字段 ⇒ 替身必须同步，
+        # 否则 build_report 里硬索引 spec.neutralize 会 AttributeError
+        self.neutralize = False
+        self.neutralize_exposures = ()
 
 # IC 要能真算出来，横截面必须 ≥ rank_ic 的 min_names(30)
 # ⇒ 造一个 40 只票的 fixture（价格按列各不相同，否则常数横截面会让 Spearman 抛断言）
