@@ -186,9 +186,15 @@ check(near(float(tab.loc[4, "最大回撤"]), MT.max_drawdown(_navL), 1e-12)
 
 # ls_summary 的键集合变了（比值法/日差法/月差法 → 三口径 + t/p + 期数）
 lsv = MT.ls_summary(nav_df, [_navL.index[0], _navL.index[-1]])
-check(set(lsv) == {"层差(pp)", "多空年化", "多空累计", "多空净年化", "多空t", "多空p",
-                    "多空夏普", "多空最大回撤", "期数"},
-      f"ls_summary 的键：{sorted(lsv)}")
+# 2026-11-11（T-3.7）：加 Newey-West 三件套（t / p / lags）——
+#   多空收益序列有自相关，朴素 t 被系统性高估，所以两列必须都出。
+check(set(lsv) == {'层差(pp)', '多空年化', '多空累计', '多空净年化', '多空t', '多空p',
+                    '多空夏普', '多空最大回撤', '期数',
+                    '多空t_nw', '多空p_nw', 'nw_lags'},
+      'ls_summary 的键：%r' % (sorted(lsv),))
+# lag 必须是非负整数（经验法则 4*(T/100)^(2/9)）
+check(isinstance(lsv['nw_lags'], int) and lsv['nw_lags'] >= 0,
+      'nw_lags 必须是非负整数（实测 %r）' % (lsv['nw_lags'],))
 # 手算：只取首尾两点 ⇒ 多头 +20%、空头 −10% ⇒ 每期差 = 0.2 − (−0.1) = 0.3
 check(near(lsv["多空累计"], 0.30, 1e-12),
       f"多空累计 = 0.2 − (−0.1) = 30%（实测 {lsv['多空累计']:.6%}）")

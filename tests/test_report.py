@@ -70,10 +70,14 @@ meta = {"factor": "rev_20d", "start": idx[0].date(), "end": idx[-1].date(), "n_r
         "freq": "ME", "universe": "all",
         "fee_buy": 0.00025, "fee_sell": 0.00075, "slippage": 0.0005, "stamp": "20261012",
         # 2026-11-10（T-6.2）：banner 新增中性化口径行。硬索引 ⇒ 这里必须给键
-        "neutralize": False, "neutralize_exposures": ()}
+        "neutralize": False, "neutralize_exposures": (), "include_st": True}
 bn = RP.banner(meta)
 # 2026-11-10（T-6.2）：中性化口径必须出现在 banner 里，且能区分开/关
 check("中性化：**关**" in bn, "关闭时 banner 印「中性化：关」")
+# 2026-11-10（T-6.3）：ST 口径必须印出来 —— 含/不含差 0.4~0.9pp 超额、1.2pp 波动
+check("ST：含" in bn, "含 ST 时 banner 印「ST：含」")
+_bnX = RP.banner(dict(meta, include_st=False))
+check("ST：剔除" in _bnX and "ST：含" not in _bnX, "剔除 ST 时 banner 必须印「ST：剔除」")
 _bnN = RP.banner(dict(meta, neutralize=True,
                       neutralize_exposures=("industry", "ln_float_mv")))
 check("横截面秩" in _bnN and "ln_float_mv" in _bnN,
@@ -229,6 +233,7 @@ class _FakeSpec:
         # 否则 build_report 里硬索引 spec.neutralize 会 AttributeError
         self.neutralize = False
         self.neutralize_exposures = ()
+        self.include_st = True
 
 # IC 要能真算出来，横截面必须 ≥ rank_ic 的 min_names(30)
 # ⇒ 造一个 40 只票的 fixture（价格按列各不相同，否则常数横截面会让 Spearman 抛断言）

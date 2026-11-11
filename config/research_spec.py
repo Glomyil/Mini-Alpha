@@ -21,7 +21,15 @@ NEUTRALIZE_EXPOSURES = ("industry", "ln_float_mv")
 NEUTRALIZE_MV_FLOOR = 0.0
 NEUTRALIZE_WEIGHT = None
 NEUTRALIZE_DROP_FIRST = True
-KNOWN_EXPOSURES = frozenset({"industry", "ln_float_mv"})
+# 口径单一来源（ROADMAP §1）：能剥哪些暴露项是【算法能力】，
+#   所以定义在 backtest/neutralize.py，这里直接引入。
+#   以前两处各写一份白名单，漂移了没人发现（拼错一个字母 ⇒ 校验通过但算法不认）。
+from backtest.neutralize import KNOWN_EXPOSURES  # noqa: E402  反向依赖已检查：neutralize 不引入 config
+
+# 股票池是否包含 ST。默认 True（含）= 与历史台账一致；改成 False 才进指纹。
+#   为什么默认含：清洗层【故意的】不剔 ST（那是研究口径，不是数据事实），
+#   所以「含 ST」才是「未加任何口径」的状态。
+INCLUDE_ST = True
 
 
 @dataclass(frozen=True)
@@ -46,6 +54,7 @@ class RunSpec:
     neutralize_mv_floor: float
     neutralize_weight: object        # None 或 "float_mv"
     neutralize_drop_first: bool
+    include_st: bool
     cfg_mtime:  str
 
     def fingerprint(self) -> str:
@@ -71,12 +80,16 @@ class RunSpec:
                 f"neut_w={self.neutralize_weight}",
                 f"neut_drop_first={int(self.neutralize_drop_first)}",
             ]
+        # 股票池：只在【剔除 ST】时追加一段。默认含 ST ⇒ 指纹不动 ⇒ 历史 hash 继续可比
+        if not self.include_st:
+            parts.append("exclude_st=1")
         return "|".join(parts)
 
     def banner(self) -> str:
         return (f"spec:{self.cfg_hash} 区间:{self.since}+ 到 {self.until} "
                 f"费率:{self.fee_buy:.5f}/{self.fee_sell:.5f} 滑点:{self.slippage:.4f} "
                 f"层数:{self.n_layers} 年化:{self.trading_days}d universe:{self.universe} "
+                f"股票池:{('含ST' if self.include_st else '剔除ST')} "
                 # ⚠️ 这里必须是 【字符串 + (三元表达式)】，不能把三元放最后：
                 #    if/else 的优先级【低于】隐式字符串拼接 ⇒
                 #    写成 "...{universe}" f"中性化..." if X else "中性化:关"
@@ -98,6 +111,7 @@ def _yaml_mtime() -> str:
 _RESEARCH_KEYS = frozenset({
     "since", "split", "fee_buy", "fee_sell", "slippage",
     "n_layers", "trading_days", "init_cash", "freq", "borrow_cost", "neutralize",
+    "include_st",
 })
 # 注意 periods_per_year 【不在此列】：它由 freq 推出，yml 里不该出现。
 # 真写了 ⇒ _check_research_keys 会报「未知键」，强制你去删掉它而不是让它静默覆盖映射表。
@@ -222,6 +236,7 @@ def load_spec(since: int | None = None, until: str = "-", **override) -> RunSpec
         neutralize_weight=_g("neutralize.weight", NEUTRALIZE_WEIGHT),
         neutralize_drop_first=bool(
             _g("neutralize.drop_first", NEUTRALIZE_DROP_FIRST)),
+        include_st=bool(_g("include_st", INCLUDE_ST)),
     )
     vals.update(override)          # ★ 先合并 override，再推 freq / N
 

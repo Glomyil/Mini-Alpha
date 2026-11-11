@@ -12,11 +12,15 @@ CACHE = Path("backtest/cache")
 IND_SRC = Path("data/storage/industry_snapshot")   # T-6.1：按调仓日的行业快照
 IND_MAP = Path("data/storage/industry_map.parquet")  # 行业字符串 → 稳定编号（跨重建不变）
 _MV_WARNED = [False]   # float_mv 缺失只警告一次（5476 只票别刷屏）
+_ST_WARNED = [False]   # isST 缺列也只警告一次
 FIELDS = ["hfq_close", "hfq_open", "ret_1d_hfq",
           "can_trade", "amount", "reason",
           # 2026-11-04（T-6.1）：中性化所需的两张原料表
           "float_mv",   # 流通市值 = close(未复权) × volume/(turn/100)，由 cleaner/derived 产出
-          "industry"]   # 证监会行业编号（int16，0=未知），由 industry_snapshot 摊平而来
+          "industry",   # 证监会行业编号（int16，0=未知），由 industry_snapshot 摊平而来
+          # 2026-11-10：ST 状态。清洗层【故意不剔 ST】（那是股票池口径，属于研究选择，
+          #   不是数据事实）；但研究层原先连 isST 都看不到 ⇒ 想剔也剔不了。补上这张表。
+          "is_st"]
 _SELF = Path(__file__)                            # 判断"缓存是不是比这份代码新"
 
 
@@ -97,7 +101,7 @@ def _build_industry_wide(ref: pd.DataFrame):
 def build_panels(files):
     print(f"  开始重建面板：{len(files):,} 只 × {len(FIELDS)} 张表，约 30–90 秒（别中断）…")
     # """读 cleaner_daily → 6 张宽表（不做清洗、不落盘）"""
-    c_l, o_l, r_l, t_l, a_l, rs_l, mv_l = [], [], [], [], [], [], []  # 想新建宽表就自己往等式左边加列表名，右边加列表:[]
+    c_l, o_l, r_l, t_l, a_l, rs_l, mv_l, st_l = [], [], [], [], [], [], [], []  # 想新建宽表就自己往等式左边加列表名，右边加列表:[]
     for p in files:
         d = pd.read_parquet(p)
         # float_mv 缺失 ⇒ 给 NaN 并大声警告一次。
@@ -105,7 +109,9 @@ def build_panels(files):
         #   阻塞其他工作。真正该"硬失败"的地方是明天的 neutralize()（三条恒等式会抓住 NaN）。
         #   但绝不许 fillna(0) —— 那会让"没数据"和"市值是 0"混成一件事。
         if "float_mv" not in d.columns:
-            if not _MV_WARNED:
+            # 同上：必须下标 [0]。原来写的 if not _MV_WARNED 是死代码，
+            # ⇒ float_mv 缺失的告警自 2026-11-04 加进去后一直没打过。
+            if not _MV_WARNED[0]:
                 logger.warning(
                     f"{p.name} 缺 float_mv 列 ⇒ 面板 float_mv 全 NaN。"
                     f"旧数据（11 列）没有 turn，需用新 KLINE_FIELDS 全量重下（T-6.1 工单 §5）")
@@ -142,6 +148,24 @@ def build_panels(files):
         # ⚠️ 必须 float32：整数 dtype 的 Series 在 concat 索引不齐时会用【0】填缺失（不是 NaN）✗
         #    ⇒ 那样 fillna(4) 就无从下手，整列会变成 0（实测踩过：sh.601268 只有 92 行却得到 2839 个 0）
         rs_l.append(pd.Series(rs, index=idx, name=p.stem, dtype="float32"))
+        # ④b is_st：直接读 cleaner 的 isST（清洗层已按它区分 ±5% 涨跌停，见 cleaner/limits.py）
+        #    ⚠️ 同样用 float32：int 的 Series 在 concat 索引不齐时会拿 0 填缺失，
+        #       而 0 在这里的意思是"不是 ST" ⇒ 会把"未上市"误判成"正常股票" ✗
+        #    缺列（老文件 / 测试 fixture）一律当缺失 ⇒ NaN ⇒ 后面 .eq(1) 得 False。
+        if "isST" in d.columns:
+            _st = pd.to_numeric(d["isST"], errors="coerce").to_numpy()
+        else:
+            # ⚠️ 缺列不能静默当“全都不是 ST”：那样 include_st=false 想剔也剔不掉，而报告仍印「剔除 ST」⇒ 口径撒谎。
+            #   照 float_mv 那边的做法：只警告一次，不刷屏（5476 只票）。
+            # ⚠️ 必须下标取 [0]：_ST_WARNED 是非空列表，not [False] 恒为 False
+            #   ⇒ 写成 if not _ST_WARNED 的话这条告警永远不会打（测试抓到的）
+            if not _ST_WARNED[0]:
+                logger.warning(
+                    f"{p.name} 缺 isST 列 ⇒ 面板 is_st 全 False；"
+                    f"include_st=false 将无效（不会剔掉任何票）")
+                _ST_WARNED[0] = True
+            _st = np.full(len(idx), np.nan)
+        st_l.append(pd.Series(_st, index=idx, name=p.stem, dtype="float32"))
 
         # ⑤ amount：流动性因子用（单位只影响绝对值，不影响横截面【排名】✓）
 
@@ -167,7 +191,10 @@ def build_panels(files):
             # 没有这一格 ⇒ NaN ⇒ 4（不在市）。必须 fillna 后再 cast，否则留 NaN ✓
             "reason":     pd.concat(rs_l, axis=1).sort_index().fillna(4).astype("int8"),
             # 流通市值：NaN 必须留着（停牌/无 turn 日），不许 fillna(0) —— 明天取 ln 时才知道哪些要剔
-            "float_mv":   pd.concat(mv_l, axis=1).sort_index().astype("float32")}
+            "float_mv":   pd.concat(mv_l, axis=1).sort_index().astype("float32"),
+            # ST 状态（bool）。缺格一律当 False：宁可把未知当"正常股票"（与清洗层一致，
+            #   清洗层也没剔 ST），也不要把"未知"当 ST 而凭空缩池 —— 后者会静默改变股票池。
+            "is_st":      pd.concat(st_l, axis=1).sort_index().eq(1)}
 
     # 行业宽表的数据源是【按日的调仓日快照】，不是每股 parquet ⇒ 单独摊平，
     #   没有快照就跳过（T-6.1 是分步抓的，允许暂时缺失），只 warning 不报错。

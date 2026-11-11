@@ -56,7 +56,9 @@ def banner(meta: dict) -> str:
         # 硬索引，不用 .get(默认值)：本函数其余字段都硬索引，
         # 缺键就该 KeyError（docstring：「缺一项就算没做这一格」）。
         f"调仓：{freq_label(meta['freq'])}（{meta['n_rdate']} 期）",
-        f"> - 股票池：{universe_label(meta['universe'])}",
+        f"> - 股票池：{universe_label(meta['universe'])}"
+        # ST 口径必须印出来 —— 含还是不含，超额能差 0.4~0.9pp、波动能差 1.2pp
+        f" ｜ ST：{'?' if meta['include_st'] is None else ('含' if meta['include_st'] else '剔除')}",
         f"> - 净值口径：**{meta['val_basis']}**（收盘 / 开盘两套，另一套作诊断）｜ 成交：**T+1 开盘**（缺价即不成交）",
         f"> - 年化常数：**{meta['trading_days']}** 交易日/年（A 股；252 是美股）｜ IC-IR 用 {meta['periods_per_year']} 期/年",
         f"> - 成本：佣金 {meta['fee_buy']}/{meta['fee_sell']} ｜ 滑点 {meta['slippage']}（单边）｜ 无整手",
@@ -187,6 +189,8 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             # 实际剥了哪几项必须来自 spec —— 写死字符串会让 banner 撒谎
             #（实测：只剥行业那份报告也印「行业+ln(流通市值)」）
             "neutralize_exposures": tuple(spec.neutralize_exposures) if spec else (),
+            # 股票池口径（T-6.3）：不传 spec 时不猜「含 ST」，给 None 让 banner 印 ?
+            "include_st": (bool(spec.include_st) if spec else None),
             "stamp": stamp}
 
     parts = [f"# 因子回测报告 · `{factor}`", "", banner(meta), ""]
@@ -261,20 +265,40 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
         else:
             _pos_txt = (f"- **IC > 0 胜率 {_pos:.1%}**"
                         f"（{ic_sum['n_pos']} / {ic_sum['n']} 期为正）")
-        logger.info(f"ic 有效:{ic_sum['n']} 无效:{ic_sum.get('n_bad', 0)} "
+        logger.info(f"ic 有效:{ic_sum['n']} 无效:{ic_sum['n_bad']} "
                     f"mean:{ic_sum['ic_mean']:.4f} ir:{ic_sum['ic_ir']:.4f}")
         # 中性化开启时必须标注，否则读者会以为这是 raw 因子的 IC（口径②：缺一项就算没做这一格）
         _ic_title = ("## 4. IC（中性化后 · 标签 = 下一个调仓日的区间收益）"
                      if meta["neutralize"] else "## 4. IC（标签 = 下一个调仓日的区间收益）")
         parts += [_ic_title, "",
                   f"- IC 均值 **{ic_sum['ic_mean']:.4f}** ｜ 标准差 {ic_sum['ic_std']:.4f} "
+                  # 2026-11-11（T-3.7）：IC-IR 也给 NW 版。IC 序列有自相关，
+                  #   朴素 IC-IR 会失真；两列并列 + 印 lag，读者自己判断。
                   f"｜ **IC-IR {ic_sum['ic_ir']:.4f}** ｜ 期数 {ic_sum['n']}",
                   _pos_txt,
+                  # Newey-West 版 IC-IR：lag 必须印出来（它是研究选择）
+                  f"- IC-IR（Newey-West, lag={ic_sum.get('nw_lags', '?')}）= "
+                  f"**{ic_sum.get('ic_ir_nw', float('nan')):.4f}**",
                   ""]
     # ── §5 多空诊断（2026-11-03 重写：删比值法/日差法/月差法，改标准复利 + t/p）──
     _t, _p = ls["多空t"], ls["多空p"]
     _t_txt = "nan" if _t != _t else f"{_t:+.2f}"          # x != x 是 nan 的判据
     _p_txt = "nan" if _p != _p else f"{_p:.3g}"
+    _t_nw, _p_nw = ls['多空t_nw'], ls['多空p_nw']
+    _t_nw_txt = "nan" if _t_nw != _t_nw else f"{_t_nw:+.2f}"
+    _p_nw_txt = "nan" if _p_nw != _p_nw else f"{_p_nw:.3g}"
+    # T-3.7 验收：朴素与 NW 差 >20% 时必须给说明（不然两列并列反而让人困惑）
+    def _nw_gap_note(naive, nw, label):
+        # 用本文件惯用的 NaN 判据（x != x），不依赖 numpy
+        if naive != naive or nw != nw or naive == 0:
+            return ""
+        d = abs(nw - naive) / abs(naive) * 100.0
+        if d <= 20.0:
+            return ""
+        return (f"> ⚠️ {label}差 **{d:.0f}%**（>20%）⇒ "
+                "序列自相关不可忽略，应以 Newey-West 为准。")
+
+    _nw_note_t = _nw_gap_note(_t, ls['多空t_nw'], "多空 t 的朴素与 NW ")
     _sh, _mdd = ls["多空夏普"], ls["多空最大回撤"]
     _sh_txt = "nan" if _sh != _sh else f"{_sh:+.2f}"
     _mdd_txt = "nan" if _mdd != _mdd else f"{_mdd:.2%}"
@@ -298,6 +322,12 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
               f"（零成本口径，按 {ls['期数']} 期）",
               f"> 配对 t = **{_t_txt}** ｜ p = **{_p_txt}**"
               f"（n = {ls['期数']} 期，df = {ls['期数'] - 1}，p 用正态近似）",
+              # 2026-11-11（T-3.7）：Newey-West 并列。多空收益序列有自相关（行业轮动、
+              #   风格切换都有惯性）⇒ 朴素 t 被系统性高估。两列都印，让读者自己看差多少。
+              #   lag 必须印出来 —— 它是个研究选择，藏起来等于偷偷换口径。
+              f"> 配对 t（Newey-West, lag={ls['nw_lags']}）= "
+              f"**{_t_nw_txt}** ｜ p = **{_p_nw_txt}**",
+              _nw_note_t,
               "> 「层差」是两个年化率相减（pp），**不存在累计口径**，所以那格写「—」。", ""]
     # 零依赖版 Spearman（pandas 那个要 scipy，requirements 里没有 ✗）
     mono = MT.spearman_rank(

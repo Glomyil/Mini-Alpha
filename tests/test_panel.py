@@ -325,6 +325,53 @@ expect_raise(lambda: panel.load_panels(START, END, src=FX, cache=BAD, full=True)
              "缓存文件被改坏（shape 与 meta 不符）→ 报错，不静默返回坏面板")
 
 print("\n" + "=" * 46)
+# ============================================================================
+# ⑦ is_st：fixture 没有 isST 列时必须【吵】一次
+#   否则 include_st=false 想剔 ST 也剔不掉，而报告仍印「剔除 ST」⇒ 口径撒谎。
+#   照 float_mv 那边的做法：只警告一次（5476 只票不刷屏）。
+# ============================================================================
+# ⑦ is_st：fixture 没有 isST 列时必须【吵】一次
+#   否则 include_st=false 想剔 ST 也剔不掉，而报告仍印「剔除 ST」⇒ 口径撒谎。
+#   照 float_mv 那边的做法：只警告一次（5476 只票不刷屏）。
+#   注意：本仓用的是 loguru，不是 stdlib logging ⇒ 抓日志要用 logger.add(sink)。
+# ============================================================================
+# ⑦ is_st：数据里没有 isST 列时必须【吵】一次
+#   否则 include_st=false 想剔 ST 也剔不掉，而报告仍印「剔除 ST」⇒ 口径撒谎。
+#   做法：从 fixture 复制一份并【确定性地删掉 isST 列】，不依赖 fixture 本身有没有。
+#   注意：本仓用 loguru 不是 stdlib logging ⇒ 抓日志要 logger.add(sink)。
+# ============================================================================
+print()
+print("── ⑦ isST 缺列要叫──")
+from loguru import logger as _lgr  # noqa: E402
+import pandas as _pd  # noqa: E402
+
+_hits = []
+_sid = _lgr.add(lambda m: _hits.append(m.record["message"]), level="WARNING")
+
+_base = _pd.read_parquet(FILES3[0])
+if "isST" in _base.columns:
+    _base = _base.drop(columns=["isST"])
+_p1 = TMP / "_no_isst_1.parquet"
+_p2 = TMP / "_no_isst_2.parquet"
+_base.to_parquet(_p1, index=False)
+_base.to_parquet(_p2, index=False)
+
+panel._ST_WARNED[0] = False
+panel.build_panels([_p1])
+check(any("isST" in m for m in _hits),
+      f"缺 isST 列 ⇒ 必须警告（实测捕到 {len(_hits)} 条）")
+
+# ⚠️ 不能在这里重置开关：第二条断言要验的正是【开关不重置就不再刷】。
+_hits.clear()
+_panel2 = panel.build_panels([_p2])          # 换文件 ⇒ 缓存必然未命中，一定重建
+_n = sum(1 for m in _hits if "isST" in m)
+_lgr.remove(_sid)
+# 第二次 build（开关未重置）应该【一条都不新增】
+check(_n == 0, f"第二次不再刷（新增 {_n} 条，应为 0）")
+check(not bool(_panel2["is_st"].to_numpy().any()),
+      "缺 isST 列时 is_st 必须全 False（未知一律当正常股票，不凭空缩池）")
+
+
 print(f"结果: 通过 {passed} / {passed + failed}")
 if failed == 0:
     shutil.rmtree(TMP, ignore_errors=True)

@@ -180,13 +180,14 @@ def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> 
 
 
 def ic_summary(ic: pd.Series,
-               periods_per_year: int = REBALANCE_PERIODS_PER_YEAR) -> dict:
+               periods_per_year: int = REBALANCE_PERIODS_PER_YEAR, lags: int | None = None) -> dict:
     # valid periods (DEBT-013: len(ic) used to count NaN periods too)
     n = int(ic.notna().sum())        # 有效期数（DEBT-013：以前用 len(ic)，把 NaN 的期也算进去了）
     n_bad = int(len(ic) - n)             # invalid periods
     if n == 0:
         return {"ic_mean": float("nan"), "ic_std": float("nan"),
-                "ic_ir": float("nan"), "ic_pos_rate": float("nan"),
+                "ic_ir": float("nan"), "ic_ir_nw": float("nan"),
+                "ic_pos_rate": float("nan"), "nw_lags": 0,
                 "n": 0, "n_pos": 0, "n_bad": n_bad}
     ic = ic.dropna()
     sd = float(ic.std(ddof=1))
@@ -194,6 +195,9 @@ def ic_summary(ic: pd.Series,
     # 严格 > 0（IC 恰好 0 不算正）——和券商研报口径一致。
     # n_pos 直接返回，不让调用方拿比率乘回去四舍五入（那会偶尔差 1 期）。
     n_pos = int((ic > 0).sum())
+    # Newey-West：IC 序列同样有自相关（风格切换有惯性）⇒ 朴素 IC-IR 也会失真
+    _nw_lag = nw_lags(n) if lags is None else max(0, int(lags))
+    t_nw, _p_nw = t_stat_nw(ic.to_numpy(dtype="float64"), lags=_nw_lag)
     return {"ic_mean": float(ic.mean()),
             "ic_std": sd,
             # ⚠️ 年化粒度必须由调用方按 freq 传：写死 12 的话 freq=W-FRI 时
@@ -201,7 +205,14 @@ def ic_summary(ic: pd.Series,
             #    退化的判法照抄 sharpe() 的绝对阈值，不用 if sd（浮点残差会让它印 1e16）。
             "ic_ir": (float(ic.mean() / sd * np.sqrt(periods_per_year))
                       if sd >= 1e-12 else float("nan")),
+            # 2026-11-11（T-3.7）：IC-IR 的 Newey-West 版。
+            #   恒等式：IC-IR = t * sqrt(ppy/n)，其中 t = mean/(sd/sqrt(n))
+            #   ⇒ NW 版就是把 t 换成 t_nw。所以它和朴素版【同一量纲】，可以直接比。
+            #   ⚠️ 别在这里重写一遍 HAC 公式 —— 用 t_stat_nw 那个已被 statsmodels 对拍过的。
+            "ic_ir_nw": (float(t_nw * math.sqrt(periods_per_year / n))
+                         if np.isfinite(t_nw) else float("nan")),
             "ic_pos_rate": float(n_pos / n),
+            "nw_lags": _nw_lag,
             "n": n, "n_pos": n_pos, "n_bad": n_bad}
 
 
@@ -253,6 +264,85 @@ def _norm_p(t: float) -> float:
     df < 10 时会偏松 ⇒ 报告里必须注明「正态近似」。
     """
     return 2.0 * (1.0 - 0.5 * (1.0 + math.erf(abs(t) / math.sqrt(2.0))))
+
+
+def nw_lags(n: int) -> int:
+    """Newey-West 的 lag 经验法则：floor(4*(T/100)^(2/9))。
+
+    常见样本量下：T=130 ⇒ 4 期；T=552 ⇒ 5 期；T=1000 ⇒ 6 期（实测值，有测试钉着）。
+    为什么要有它：lag 是个【研究选择】，不写死一个默认值就等于把选择藏起来。
+    报告里必须把它印出来（用了几个 lag）。
+    """
+    n = int(n)
+    if n < 2:
+        return 0
+    return int(math.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
+
+
+def newey_west_se(series, lags: int | None = None, use_correction: bool = True) -> float:
+    """均值的 Newey-West（Bartlett 核）HAC 标准误。
+
+    朴素 SE 假设「每期独立」；收益/IC 有自相关时那是错的 ——
+    正自相关会让真实 SE 远大于朴素值 ⇒ 朴素 t 被系统性高估。
+
+    公式（Bartlett 权重，Newey-West 1987）：
+        g_j = (1/T) Σ_{t>=j} (x_t - x̄)(x_{t-j} - x̄)
+        S   = g_0 + 2 Σ_{j=1..L} (1 - j/(L+1)) g_j
+        SE  = sqrt(S / T)
+
+    ⚠️ 三个容易写错的点：
+      ① 归一化用 1/T（不是 1/(T-j)）；
+      ② Bartlett 权重是 (1 - j/(L+1))，写反成 j/(L+1) 会让长 lag 权重更大；
+      ③ lags=0 必须【逐位退化】成朴素 SD/√n —— 这条有测试守着。
+
+    lags 传 None ⇒ 用 nw_lags(T) 的经验法则；显式传 0 才是「不做 HAC 修正」。
+
+    use_correction：乘一个小样本因子 T/(T-1)（我们只估 1 个参数=均值）。
+      这不是可选项 —— 不乘的话 lags=0 会得到 sqrt((T-1)/T) 倍的偏小值，
+      和报告里那列朴素 SE 对不上，读者会以为两列有一列算错了。
+      statsmodels 的 cov_hac(use_correction=True) 也是这么做的。
+    """
+    r = np.asarray(series, dtype="float64")
+    r = r[np.isfinite(r)]
+    n = r.size
+    if n < 2:
+        return float("nan")
+    if lags is None:
+        lags = nw_lags(n)
+    L = max(0, int(lags))
+    e = r - r.mean()
+    g0 = float((e * e).sum()) / n
+    S = g0
+    for j in range(1, min(L, n - 1) + 1):
+        gj = float((e[j:] * e[:-j]).sum()) / n
+        S += 2.0 * (1.0 - j / (L + 1.0)) * gj
+    if S <= 0:            # 负自相关极强时 Bartlett 也可能给出 <=0（非常罕见）
+        return float("nan")
+    if use_correction and n > 1:
+        S *= n / (n - 1.0)      # 小样本修正 ⇒ lags=0 时正好还原 SD/√n
+    return float(math.sqrt(S / n))
+
+
+def t_stat_nw(series, lags: int | None = None) -> tuple[float, float]:
+    """t_stat 的 Newey-West 版：t = mean / SE_hac，p 用同一个正态近似重算。
+
+    ⚠️ p 必须由【新的 t】重算。直接沿用朴素 p 是最常见的错 ——
+       那样 t 变了 p 没变，报告里两列会自相矛盾。
+
+    lags=0 时与 t_stat 完全逐位一致（有测试守着）。
+    """
+    r = np.asarray(series, dtype="float64")
+    r = r[np.isfinite(r)]
+    n = r.size
+    if n < 3:
+        return float("nan"), float("nan")
+    if np.ptp(r) == 0.0:
+        return float("nan"), float("nan")
+    se = newey_west_se(r, lags=lags)          # lags=0 时 newey_west_se 自己会退化成朴素 SE
+    if not np.isfinite(se) or se <= 0:
+        return float("nan"), float("nan")
+    t = float(r.mean() / se)
+    return t, _norm_p(t)
 
 
 def t_stat(series) -> tuple[float, float]:
@@ -316,6 +406,10 @@ def ls_summary(nav_df: pd.DataFrame, rdates, *, borrow_cost: float = 0.08,
     # 真正的守卫在 _period_returns 的 A（收益无 NaN），上游已经拦过一次。
 
     t, p = t_stat(diff)
+    # 2026-11-11（T-3.7）：Newey-West 版并列。多空收益序列有自相关（行业轮动、
+    #   风格切换都有惯性）⇒ 朴素 t 被系统性高估。两列都印，让读者自己看差多少。
+    _nw_lag = nw_lags(len(np.asarray(diff, dtype='float64')[np.isfinite(diff)]))
+    t_nw, p_nw = t_stat_nw(diff, lags=_nw_lag)
 
     # ④ 多空夏普 / 最大回撤（2026-11-04 加）
     #    夏普 = 年化收益 / 年化波动；年化波动 = 每期标准差 × √N（是乘不是除 ——
@@ -340,6 +434,9 @@ def ls_summary(nav_df: pd.DataFrame, rdates, *, borrow_cost: float = 0.08,
         "多空净年化": ls_ann - borrow_cost,
         "多空t":      t,
         "多空p":      p,
+        "多空t_nw":   t_nw,
+        "多空p_nw":   p_nw,
+        "nw_lags":    _nw_lag,
         "多空夏普":   _sharpe,
         "多空最大回撤": _mdd,
         "期数":       int(diff.size),

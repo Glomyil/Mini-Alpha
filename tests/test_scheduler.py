@@ -92,8 +92,8 @@ panels = load_panels()
 # 2026-11-04（T-6.1）：面板从 6 张加到 8 张 —— float_mv（流通市值）与 industry（行业编号），
 #   都是为行业/市值中性化准备的原料。断言保持【精确集合】，不是只看数量。
 check(sorted(panels) == ["amount", "can_trade", "float_mv", "hfq_close", "hfq_open",
-                         "industry", "reason", "ret_1d_hfq"],
-      f"面板 8 张表（T-2.2 加 reason、T-6.1 加 float_mv/industry）：{sorted(panels)}")
+                         "industry", "is_st", "reason", "ret_1d_hfq"],
+      f"面板 9 张表（T-2.2 reason、T-6.1 float_mv/industry、T-6.3 is_st）：{sorted(panels)}")
 # 两张新表的 dtype 必须能被 to_numpy 直接吃（industry 是分类编号，float_mv 是价格×股数）
 check(str(panels["industry"].dtypes.iloc[0]) == "int16",
       f"industry dtype 必须是 int16（实测 {panels['industry'].dtypes.iloc[0]}）")

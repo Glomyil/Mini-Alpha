@@ -18,6 +18,7 @@ from config.config_manager import config
 import hashlib
 
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from backtest.panel import load_panels
 from backtest.assemble import build_features, rebalance_dates
@@ -83,6 +84,17 @@ def main():
             continue
         _spec = FACTORS[name]
         _fval = _spec["fn"](build_features(panels, [name]), {}) * _spec["sign"]
+
+        # 股票池口径：剔除 ST（T-6.3）—— 因子值的【前置操作】，必须在一切消费之前。
+        #   置 NaN 而不是改 can_trade：ST 股现实中能买卖，把它标成不可交易会让
+        #   已持仓变 ST 的票「卖不掉」（假），还会污染 can_trade 这个市场事实字段。
+        #   置 NaN 之后下游四处自动一致：中性化样本 / 权重 / rank_ic / 报告。
+        if not spec.include_st:
+            # 逐格写（PITFALLS #24：写入权不许外包给库）。用 .where() 会碰那个偶发出错的出口。
+            _fv = np.array(_fval.to_numpy(dtype="float64"), copy=True)   # 一次快照
+            _st = panels["is_st"].to_numpy()
+            _fv[_st] = np.nan                                            # 整片写，不逐格循环
+            _fval = pd.DataFrame(_fv, index=_fval.index, columns=_fval.columns)
 
         # 中性化（T-6.2）必须在这里 —— 在 build_target_weights 和 build_report【之前】：
         #   _fval 是唯一的因子值来源，它同时流向 ①权重 ②报告（报告内部调 rank_ic）。

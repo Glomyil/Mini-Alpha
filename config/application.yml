@@ -79,3 +79,8 @@ research:
      mv_floor: 0.0                       # float_mv 下限（元），0 = 不设
      weight: null                        # null = 等权；float_mv = 市值加权
      drop_first: true                    # 行业哑变量去掉一列
+
+  # 股票池口径：是否包含 ST。true = 含（默认，与历史台账一致）；false = 剔除
+  #   剔除是【因子值前置操作】：ST 的因子值置 NaN ⇒ 不进中性化/不进权重/不进 IC/不进报告
+  #   注意：不改 can_trade —— 那是市场事实（停牌/涨跌停）；ST 是股票池口径，两件事
+  include_st: true

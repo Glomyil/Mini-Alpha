@@ -5,9 +5,42 @@ KNOWN_EXPOSURES = frozenset({"industry", "ln_float_mv"})
 
 
 def _cross_sectional_rank(df: pd.DataFrame) -> np.ndarray:
-    # 逐期【横截面】百分位秩（0~1）。不是时序秩 ——
-    # 时序秩（同一只票在历史上排名）会毁掉横截面可比性 ⇒ 分层直接用不了。
-    return df.rank(axis=1, pct=True, na_option="keep").to_numpy(dtype="float64")
+    """逐期【横截面】百分位秩（0~1）。不是时序秩 ——
+    时序秩（同一只票在历史上排名）会毁掉横截面可比性 ⇒ 分层直接用不了。
+
+    ⚠️ 逐格写，不用 df.rank()（2026-11-11 按 PITFALLS #24 收回写入权）：
+       那一节封掉的九个出口里就包含 rank/where —— 症状是「换手塌陷」这类偶发，
+       同一份数据约 5% 的运行结果不同。这里 np.full 先铺满，再逐格写入。
+
+    与 pandas 的 rank(axis=1, pct=True, na_option="keep") 逐位等价：
+      · 只对非 NaN 计数（n = 该行有效个数），名次 / n；
+      · 同值取【平均名次】（pandas 默认 method="average"）；
+      · NaN 原位保持 NaN。
+    """
+    a = df.to_numpy(dtype="float64")          # 一次快照，之后只用整数下标
+    T, N = a.shape
+    out = np.full((T, N), np.nan)             # 先铺满
+    for i in range(T):
+        row = a[i]
+        ok = ~np.isnan(row)
+        n = int(ok.sum())
+        if n == 0:
+            continue
+        vals = row[ok]
+        order = np.argsort(vals, kind="mergesort")   # 稳定排序，便于同值归并
+        ranks = np.empty(n, dtype="float64")
+        ranks[order] = np.arange(1, n + 1, dtype="float64")
+        sv = vals[order]
+        i0 = 0
+        while i0 < n:                          # 同值 → 平均名次（与 pandas 一致）
+            i1 = i0
+            while i1 + 1 < n and sv[i1 + 1] == sv[i0]:
+                i1 += 1
+            if i1 > i0:
+                ranks[order[i0:i1 + 1]] = (i0 + 1 + i1 + 1) / 2.0
+            i0 = i1 + 1
+        out[i, ok] = ranks / n
+    return out
 
 
 def neutralize(factor: pd.DataFrame, panels: dict, rdates, *, exposures=("industry", "ln_float_mv"),
@@ -24,13 +57,22 @@ def neutralize(factor: pd.DataFrame, panels: dict, rdates, *, exposures=("indust
     if bad:
         raise ValueError(f"未知暴露项 {bad}；可用：{sorted(KNOWN_EXPOSURES)}")
     # 只有真要剥行业/市值时才需要对应的原料表 —— 别因为缺一张不相干的表把整件事拦掉
-    _need = {"industry": "industry", "ln_float_mv": "float_mv"}
-    _miss = [_need[e] for e in exposures if _need[e] not in panels]
+    _PANEL_OF = {"industry": "industry", "ln_float_mv": "float_mv"}   # 暴露项 → 原料表
+    _miss = [_PANEL_OF[e] for e in exposures if _PANEL_OF[e] not in panels]
     if _miss:
         raise KeyError(f"panels 缺 {_miss}（T-6.1 的原料表）")
 
-    ind_all = panels["industry"].to_numpy()
-    mv_all = panels["float_mv"].to_numpy(dtype="float64")
+    # ⚠️ 取值也必须按 exposures 分支：校验按 exposures 做了、取值却无条件取，
+    #    就会出现「只剥市值 + panels 缺 industry ⇒ 校验通过但这里 KeyError」。
+    #    评审查出来的（2026-11-11）。
+    ind_all = panels["industry"].to_numpy() if "industry" in exposures else None
+    # ⚠️ 加权也要求有 float_mv：只按 exposures 门控的话，
+    #    exposures=(industry,)+weight=float_mv 会拿到 None ⇒ TypeError（评审实测复现）。
+    _need_mv = ("ln_float_mv" in exposures) or (weight == "float_mv")
+    mv_all = panels["float_mv"].to_numpy(dtype="float64") if _need_mv else None
+    if weight == "float_mv" and mv_all is None:
+        if "float_mv" not in panels:
+            raise KeyError("weight=float_mv 需要 panels[float_mv]，但没给")
     rk = _cross_sectional_rank(factor)
     out = np.full(rk.shape, np.nan)      # 没算的就是 NaN，绝不用 0 冒充
 
@@ -38,16 +80,22 @@ def neutralize(factor: pd.DataFrame, panels: dict, rdates, *, exposures=("indust
         if t not in factor.index:
             continue
         i = factor.index.get_loc(t)
-        y, mv, ind = rk[i], mv_all[i], ind_all[i]
-        with np.errstate(invalid="ignore", divide="ignore"):
-            lnmv = np.log(mv)
+        y = rk[i]
+        mv = mv_all[i] if mv_all is not None else None
+        lnmv = None
+        if mv is not None:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                lnmv = np.log(mv)
         # 只有在【要剥市值】时才要求 ln(市值) 有效 —— 否则缺市值的票会被无谓地剔掉
         ok = np.isfinite(y)
         if "ln_float_mv" in exposures:
             ok = ok & np.isfinite(lnmv) & (mv > mv_floor)
+        elif weight == "float_mv":
+            # 不剥市值但用市值加权 ⇒ 仍然必须有有效市值（含 mv>0）
+            ok = ok & np.isfinite(mv) & (mv > 0)
         if ok.sum() < min_n:             # 样本太少 ⇒ 这一期不算（留 NaN）
             continue
-        y, lnmv, ind = y[ok], lnmv[ok], ind[ok]
+        y = y[ok]
 
         # 设计矩阵 = [截距] + 按 exposures 逐项加列
         #   ⚠️ 必须真的按 exposures 分支：只校验不执行的话，yml 里写 exposures: [industry]
@@ -57,11 +105,12 @@ def neutralize(factor: pd.DataFrame, panels: dict, rdates, *, exposures=("indust
             # 不 drop 一列 ⇒ 哑变量之和 = 截距 ⇒ 奇异。
             # drop_first 就一定要去掉一列：某期只剩 1 个行业时也必须去
             #（那时 ids[1:] 是空 ⇒ 只剩截距）—— 留着会造一个全 1 的哑变量 ≡ 截距 ⇒ 秩亏
+            ind = ind_all[i][ok]
             ids = np.unique(ind)
             use = ids[1:] if drop_first else ids
             cols += [(ind == k).astype("float64") for k in use]
         if "ln_float_mv" in exposures:
-            cols.append(lnmv)
+            cols.append(lnmv[ok])
         X = np.column_stack(cols)
 
         if weight == "float_mv":          # WLS：行乘 sqrt(w) 等价于加权最小二乘

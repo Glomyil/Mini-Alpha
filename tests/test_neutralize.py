@@ -167,7 +167,8 @@ ck(isinstance(_fp, str), "fingerprint() \u8fd4\u56de\u5b57\u7b26\u4e32\uff08\u4e
 # \u26a0\ufe0f \u4e0d\u80fd\u5199\u6b7b\u300c\u5173\u95ed\u65f6 12 \u6bb5\u300d\uff1ayml \u91cc\u7684 enabled \u968f\u65f6\u4f1a\u5207\uff08\u8dd1\u5bf9\u7167\u5b9e\u9a8c\u5c31\u8981\u5207\uff09\uff0c
 #    \u6d4b\u8bd5\u8ddf\u7740 yml \u53d8\u7ea2\u5c31\u53d8\u6210\u300c\u6d4b\u914d\u7f6e\u300d\u800c\u4e0d\u662f\u300c\u6d4b\u884c\u4e3a\u300d\u3002
 #    \u21d2 \u6309 sp.neutralize \u7684\u771f\u5b9e\u503c\u63a8\u51fa\u5e94\u6709\u7684\u6bb5\u6570\uff0c\u884c\u4e3a\u5224\u636e\u4e0d\u53d8\u3002
-_seg_should = 17 if sp.neutralize else 12
+# 段数 = 12 基础 + 中性化 5 段（开时）+ 剔 ST 1 段（关 ST 时）
+_seg_should = 12 + (5 if sp.neutralize else 0) + (0 if sp.include_st else 1)
 ck(len(_fp.split("|")) == _seg_should,
    f"\u6307\u7eb9\u6bb5\u6570\u8ddf enabled \u8d70\uff1aenabled={sp.neutralize} \u21d2 \u5e94 {_seg_should} \u6bb5\uff08\u5b9e\u6d4b {len(_fp.split('|'))}\uff09")
 _on = load_spec(neutralize=True)
@@ -241,8 +242,90 @@ _raises(lambda: neutralize(_f5, _p5, [_f5.index[0]], exposures=(), min_n=10),
         "空 exposures")
 
 
+
+# 股票池：剔 ST 必须多 1 段（否则两种口径共享同一个 hash —— 台账就分不清）
+_base = load_spec(neutralize=False, include_st=True)
+_excl = load_spec(neutralize=False, include_st=False)
+ck(len(_base.fingerprint().split("|")) == 12,
+   "include_st=True ⇒ 12 段（与历史台账可比）")
+ck(len(_excl.fingerprint().split("|")) == 13,
+   "include_st=False ⇒ 13 段（剔 ST 是一个口径，必须进指纹）")
+ck(_base.cfg_hash != _excl.cfg_hash, "含 ST 与剔 ST 必须是两个不同的 hash")
+
+
+# ============================================================================
+# S1-\u2466 \u9010\u683c\u5199\u7684\u79e9\u5fc5\u987b\u4e0e pandas \u9010\u4f4d\u7b49\u4ef7\uff08PITFALLS #24 \u6536\u56de\u5199\u5165\u6743\u540e\u7684\u56de\u5f52\u7f51\uff09
+#   pandas \u662f\u53e6\u4e00\u5957\u5b9e\u73b0 \u21d2 \u5b83\u662f\u5408\u6cd5\u7684\u72ec\u7acb oracle\uff0c\u4e0d\u662f tautology\u3002
+#   \u8986\u76d6\uff1a\u5e73\u5c40\uff08average\uff09\u3001NaN \u4fdd\u7559\u3001\u6574\u884c NaN\u3001\u6574\u884c \u6052\u503c\u3001\u771f\u5b9e\u5c3a\u5ea6\u968f\u673a\u77e9\u9635\u3002
+# ============================================================================
+print("\n\u2500\u2500 S1-\u2466 \u79e9\u5fc5\u987b\u4e0e pandas \u9010\u4f4d\u7b49\u4ef7\u2500\u2500")
+from backtest.neutralize import _cross_sectional_rank  # noqa: E402
+
+_cases = {
+    "\u6709\u5e73\u5c40+NaN": pd.DataFrame([[3.0, 1.0, np.nan, 2.0, 2.0]]),
+    "\u6574\u884c NaN": pd.DataFrame([[np.nan] * 5]),
+    "\u6574\u884c\u6052\u503c": pd.DataFrame([[5.0] * 5]),
+    "\u5355\u5143\u7d20": pd.DataFrame([[7.0]]),
+}
+_ok = True
+for _name, _df in _cases.items():
+    _w = _df.rank(axis=1, pct=True, na_option="keep").to_numpy(dtype="float64")
+    _g = _cross_sectional_rank(_df)
+    _same = np.allclose(_g, _w, atol=1e-15, equal_nan=True)
+    ck(_same, f"{_name} \u21d2 \u4e0e pandas \u9010\u4f4d\u4e00\u81f4")
+    _ok = _ok and _same
+
+# \u771f\u5b9e\u5c3a\u5ea6\uff08\u542b\u5927\u91cf\u91cd\u590d\u503c\uff0c\u6a21\u62df\u5b9e\u9645\u56e0\u5b50\u7684\u5e73\u5c40\uff09
+_r = np.random.default_rng(11)
+_big = pd.DataFrame(_r.integers(0, 40, (200, 300)).astype("float64"))
+_big.iloc[::7, ::11] = np.nan
+_w = _big.rank(axis=1, pct=True, na_option="keep").to_numpy(dtype="float64")
+_g = _cross_sectional_rank(_big)
+ck(np.allclose(_g, _w, atol=1e-15, equal_nan=True),
+   "200\u00d7300 \u5e26\u5e73\u5c40\u5e26NaN \u21d2 \u4e0e pandas \u4e00\u81f4")
+
+# ============================================================================
+# S1-\u2467 \u52a0\u6743\uff08WLS\uff09\u4e0e\u53ea\u5265\u884c\u4e1a\u7684\u7ec4\u5408\u4e0d\u8bb8\u5d29
+#   \u8bc4\u5ba1\u5b9e\u6d4b\u590d\u73b0\u8fc7\uff1a\u53ea\u6309 exposures \u95e8\u63a7 float_mv \u65f6\uff0c
+#   exposures=(industry,)+weight=float_mv \u4f1a\u62ff\u5230 None \u21d2 TypeError
+# ============================================================================
+print("\n\u2500\u2500 S1-\u2467 \u52a0\u6743 + \u53ea\u5265\u884c\u4e1a\u2500\u2500")
+_fw, _pw = _panel([[1.0, 2.0, 3.0, 4.0]], [[1, 1, 2, 2]], [[1e9, 4e9, 2e9, 8e9]])
+_rw = neutralize(_fw, _pw, [_fw.index[0]], exposures=("industry",), weight="float_mv", min_n=2)
+ck(_rw.loc[_fw.index[0]].notna().all(),
+   "exposures=(industry,) + weight=float_mv \u21d2 \u6b63\u5e38\u8fd4\u56de\uff08\u4e0d\u5d29\uff09")
+_w = np.sqrt(np.array([1e9, 4e9, 2e9, 8e9], dtype="float64"))
+_ind = np.array([1, 1, 2, 2])
+_res = _rw.loc[_fw.index[0]].to_numpy(dtype="float64")
+_wsum = float((_w ** 2).sum())
+_wmean = max(abs(float(((_w ** 2) * _res)[_ind == g].sum())) for g in (1, 2)) / _wsum
+ck(_wmean < 1e-6,
+   "WLS 恒等式是加权版 Σ(mv·r)=0；这里用相对误差判（mv 量级 1e9，绝对阈值没意义）")
+for _bad in (dict(exposures=("ln_float_mv",), weight="float_mv"),):
+    try:
+        neutralize(_fw, {"industry": _pw["industry"]}, [_fw.index[0]], min_n=2, **_bad)
+        ck(False, "\u7f3a float_mv \u4f46 weight=float_mv \u21d2 \u7adf\u7136\u6ca1\u62a5\u9519")
+    except (KeyError, TypeError) as _e:
+        ck(True, f"\u7f3a float_mv \u4f46 weight=float_mv \u21d2 {type(_e).__name__}")
+
+
+# ============================================================================
+# S2-x 口径只能有一个来源（ROADMAP §1）
+#   KNOWN_EXPOSURES 曾经在 research_spec.py 和 neutralize.py 各写一份 —— 两份白名单，
+#   漂移了不会有人发现（拼错一个字母 ⇒ 配置校验通过但算法不认）。
+#   判据用【同一个对象】，不是 == ：== 只能证明当前相等，证明不了它们是同一个源。
+# ============================================================================
+print()
+print("── S2-x 口径单一来源──")
+import backtest.neutralize as _NT  # noqa: E402
+import config.research_spec as _RS  # noqa: E402
+ck(_RS.KNOWN_EXPOSURES is _NT.KNOWN_EXPOSURES,
+   "KNOWN_EXPOSURES 必须是同一个对象（research_spec 从 neutralize 导入，不许再抄一份）")
+
 passed = sum(1 for c in CK if c)
 print("\n" + "=" * 46)
 print("  \u7ed3\u679c: \u901a\u8fc7 %d / %d" % (passed, len(CK)))
 if passed != len(CK):
     print("  \u4ecd\u6709 %d \u9879\u5931\u8d25 \u274c" % (len(CK) - passed))
+    # PITFALLS #8：永远绿的测试等于没有测试。返回码必须非 0，否则 CI / 脚本里失败永远不报警。
+    sys.exit(1)
