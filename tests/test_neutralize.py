@@ -171,9 +171,12 @@ ck(isinstance(_fp, str), "fingerprint() \u8fd4\u56de\u5b57\u7b26\u4e32\uff08\u4e
 _seg_should = 12 + (5 if sp.neutralize else 0) + (0 if sp.include_st else 1)
 ck(len(_fp.split("|")) == _seg_should,
    f"\u6307\u7eb9\u6bb5\u6570\u8ddf enabled \u8d70\uff1aenabled={sp.neutralize} \u21d2 \u5e94 {_seg_should} \u6bb5\uff08\u5b9e\u6d4b {len(_fp.split('|'))}\uff09")
-_on = load_spec(neutralize=True)
-ck(len(_on.fingerprint().split("|")) == 17,
-   f"\u5f00\u542f\u65f6 17 \u6bb5\uff08\u5b9e\u6d4b {len(_on.fingerprint().split('|'))}\uff09")
+# ⚠️ 这条也曾写死 17 —— yml 改成 include_st:false 就变 18 然后假红。
+#    现在显式传 include_st=True（不读 yml），段数者仍按开关推导。
+_on = load_spec(neutralize=True, include_st=True)
+_seg_on = 12 + 5 + 0          # 基础 12 + 中性化 5 + 含 ST 不加段
+ck(len(_on.fingerprint().split("|")) == _seg_on,
+   f"开启且含 ST 时 {_seg_on} 段（实测 {len(_on.fingerprint().split(chr(124)))}）")
 ck(_on.cfg_hash != load_spec(neutralize=False).cfg_hash,
    "\u5f00\u542f vs \u5173\u95ed \u21d2 cfg_hash \u4e0d\u540c")
 

@@ -202,6 +202,21 @@ check(lsv["期数"] == 1, f"只取首尾两点 ⇒ 1 期（实测 {lsv['期数']
 check(lsv["层差(pp)"] > 0, "多头涨、空头跌 ⇒ 层差必须 > 0")
 check("比值法" not in lsv, "比值法必须已删除（它是净值比不是收益）")
 
+print("\n── equal_weight_nav 的 mask（§4.2）──")
+# 基准必须跟宇宙走：用大盘组合去比小盘基准，超额会被系统性吞掉。
+# 这里用手算的极小例子钉住“ mask 真的变了基准”。
+_bt = pd.date_range("2020-01-01", periods=3, freq="B")
+_r2 = pd.DataFrame({"A": [0.10, 0.0, 0.0], "B": [0.0, 0.0, 0.0]}, index=_bt)
+_pn2 = {"ret_1d_hfq": _r2, "can_trade": pd.DataFrame(True, index=_bt, columns=["A", "B"])}
+_n_all = MT.equal_weight_nav(_pn2)
+_maskB = pd.DataFrame({"A": [False] * 3, "B": [True] * 3}, index=_bt)
+_n_bsel = MT.equal_weight_nav(_pn2, mask=_maskB)
+check(abs(float(_n_all.iloc[-1]) - 1.05) < 1e-12,
+      f"无 mask ⇒ 含 A 等权 ⇒ {float(_n_all.iloc[-1]):.4f}（手算 1.05）")
+check(abs(float(_n_bsel.iloc[-1]) - 1.0) < 1e-12,
+      f"mask 剔掉 A ⇒ 只剩 B(0) ⇒ {float(_n_bsel.iloc[-1]):.4f}（手算 1.0）")
+check(abs(float(_n_all.iloc[-1]) - float(_n_bsel.iloc[-1])) > 1e-6, "mask 必须真的改变基准")
+
 print("\n" + "=" * 46)
 print('\n── ⑧ 被白吃的 alpha（T-2.4）：被挡的单子错过了多少 ──')
 # 手工造的假 res —— 不跑 engine，纯测数学 ✓

@@ -130,6 +130,53 @@ check(int(L2.loc[RDATES[0], "B"]) != int(L2.loc[RDATES[0], "C"]) and max(sizes2)
 check(abs(float(W[N - 1].loc[RDATES[0], "I"]) - 0.5) < 1e-6 and abs(float(W[N - 1].loc[RDATES[0], "J"]) - 0.5) < 1e-6,
       f"层 {N-1} 只有 I / J 两只 → 各 {float(W[N-1].loc[RDATES[0], 'I']):.4f}")
 
+print("\n── ⑦ select（选股池）—— 2026-11-12 ──")
+# ① select=None 必须与不传【逐位相同】（回归门：默认行为一个字都不许变）
+W_a, L_a = WT.build_target_weights(F0, list(RDATES), CAN0, n_layers=5)
+W_b, L_b = WT.build_target_weights(F0, list(RDATES), CAN0, n_layers=5, select=None)
+_same = all(np.array_equal(W_a[L].to_numpy(), W_b[L].to_numpy()) for L in range(len(W_a)))
+check(_same and np.array_equal(L_a.to_numpy(), L_b.to_numpy()),
+      "select=None 与不传 select 的权重/分层逐位相同")
+
+# ② 收窄 select：只留 A~E 五只 ⇒ 未选中的票层 = -1，每层权重和仍为 1
+sel = pd.DataFrame(False, index=RDATES, columns=CODES)
+sel.loc[:, ["A", "B", "C", "D", "E"]] = True
+W_s, L_s = WT.build_target_weights(F0, list(RDATES), CAN0, n_layers=5, select=sel)
+_outs = [c for c in CODES if c not in ("A", "B", "C", "D", "E")]
+check(all(int(L_s.loc[RDATES[0], c]) == -1 for c in _outs),
+      f"select 外的 {len(_outs)} 只（F~J）层 = -1")
+check(all(abs(float(w.loc[RDATES[0]].sum()) - 1.0) < 1e-6 for w in W_s),
+      "收窄后每层权重和仍为 1（选股池变小不改变归一化）")
+check(int((L_s.loc[RDATES[0]] == -1).sum()) == len(_outs),
+      f"层 -1 的只数 = {int((L_s.loc[RDATES[0]] == -1).sum())}（应 {len(_outs)}）")
+
+# ③ 健康断言只看 can_trade，不被 select 影响
+#    造 1201 列（>1000 才会跑比例断言）：can_trade 占 50%（健康），
+#    select 只留 8% ⇒ 若错用了 select 做断言就会误报 "ratio 0.08 out of range"
+_nn = 1201
+_big_codes = [f"S{i:04d}" for i in range(_nn)]
+_fac = pd.DataFrame(np.tile(np.arange(_nn, dtype="float64"), (2, 1)),
+                    index=RDATES[:2], columns=_big_codes)
+_can = pd.DataFrame(True, index=RDATES[:2], columns=_big_codes)
+_can.iloc[:, _nn // 2:] = False                      # 50% 可交易（健康区间内）
+_sel = pd.DataFrame(False, index=RDATES[:2], columns=_big_codes)
+_sel.iloc[:, :100] = True                            # 只留 100/1201 ≈ 8%
+try:
+    WT.build_target_weights(_fac, list(RDATES[:2]), _can, n_layers=5, select=_sel)
+    check(True, "can_trade 占 50%（健康）+ select 只留 8% ⇒ 不误报（断言只看 can_trade）")
+except AssertionError as e:
+    check(False, f"select 把健康断断言带偏了：{str(e)[:80]}")
+
+# ④ 哨兵没被削弱：can_trade 自己退化（20%）⇒ 仍必须拒跑
+_can_bad = pd.DataFrame(True, index=RDATES[:2], columns=_big_codes)
+_can_bad.iloc[:, _nn // 5:] = False                  # 20% < 0.4
+try:
+    WT.build_target_weights(_fac, list(RDATES[:2]), _can_bad, n_layers=5, select=_sel)
+    check(False, "can_trade 占 20% 竟然没报错 —— 哨兵被削弱了")
+except AssertionError:
+    check(True, "can_trade 占 20% ⇒ 仍拒跑（哨兵没被削弱）")
+
+
 print("\n" + "=" * 46)
 print(f"结果: 通过 {passed} / {passed + failed}")
 if failed:

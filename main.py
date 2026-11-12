@@ -29,7 +29,7 @@ from backtest import report as RP
 from backtest.neutralize import neutralize
 from loguru import logger
 from config.research_spec import load_spec, save_snapshot
-
+from backtest.pool import make_pool
 
 OUT = Path(__file__).resolve().parent/"reports"
 
@@ -56,6 +56,15 @@ def init_log() -> None:
                    rotation="5 MB", retention="60 days")
 
 
+def _apply_pool_mask(f: pd.DataFrame, keep: pd.DataFrame) -> pd.DataFrame:
+    """把不在 keep 里的格子置 NaN。逐格写，不用 .where（PITFALLS #24 封过的出口）。"""
+    v = np.array(f.to_numpy(dtype="float64"), copy=True)          # 一次快照
+    k = keep.reindex(index=f.index, columns=f.columns).fillna(
+        False).to_numpy(dtype=bool)
+    v[~k] = np.nan                                                # 整片写，不逐格循环
+    return pd.DataFrame(v, index=f.index, columns=f.columns)
+
+
 def main():
     # 运行前先证明"这次用的是哪份配置"
     config_check()
@@ -75,6 +84,8 @@ def main():
     logger.info(f"RUN SINCE:{spec.since} 首个调仓日:{rdates[0].date()} 调仓:{len(rdates)}期 "
                 f"因子:{len(FACTORS)} panel:{_fp} shape:{panels['hfq_close'].shape}")
 
+    pool = make_pool(panels, spec)     # ← 只建一次（两个 mask 各 ~15MB，别在循环里重建）
+
     for i, name in enumerate(FACTORS, 1):
         print(f"[{i}/{len(FACTORS)}] {name} …", end=" ", flush=True)
         missing = [t for t in FACTORS[name].get(
@@ -85,6 +96,10 @@ def main():
         _spec = FACTORS[name]
         _fval = _spec["fn"](build_features(panels, [name]), {}) * _spec["sign"]
 
+        # ── 点位1：panel → 权重（estimation_pool）──
+        #   放在因子值出来之后、中性化之前：这一步同时决定
+        #    ①哪些票进中性化回归的样本（估 beta） ②哪些票有因子值
+        _fval = _apply_pool_mask(_fval, pool.estimation_pool)
         # 股票池口径：剔除 ST（T-6.3）—— 因子值的【前置操作】，必须在一切消费之前。
         #   置 NaN 而不是改 can_trade：ST 股现实中能买卖，把它标成不可交易会让
         #   已持仓变 ST 的票「卖不掉」（假），还会污染 can_trade 这个市场事实字段。
@@ -93,7 +108,8 @@ def main():
             # 逐格写（PITFALLS #24：写入权不许外包给库）。用 .where() 会碰那个偶发出错的出口。
             _fv = np.array(_fval.to_numpy(dtype="float64"), copy=True)   # 一次快照
             _st = panels["is_st"].to_numpy()
-            _fv[_st] = np.nan                                            # 整片写，不逐格循环
+            # 整片写，不逐格循环
+            _fv[_st] = np.nan
             _fval = pd.DataFrame(_fv, index=_fval.index, columns=_fval.columns)
 
         # 中性化（T-6.2）必须在这里 —— 在 build_target_weights 和 build_report【之前】：
@@ -108,8 +124,14 @@ def main():
                                weight=spec.neutralize_weight,
                                drop_first=spec.neutralize_drop_first)
 
-        W, _ = build_target_weights(
-            _fval, rdates, panels["can_trade"], n_layers=spec.n_layers)
+        # ── 点位2：中性化 → 引擎（invest_pool）──
+        #   必须在权重之前：它决定「在哪些票里下注」（选股 / IC / 报告样本）。
+        #   不接这一步的后果：universe_stage2 只改 cfg_hash、不改结果
+        #   ⇒ 口径声明与实际计算不一致（比起算错，这种更难发现）。
+        _fval = _apply_pool_mask(_fval, pool.invest_pool)
+
+        W, _ = build_target_weights(_fval, rdates, pool.can_trade,
+                                    n_layers=spec.n_layers, select=pool.selectable())
 
         res = run_all_layers(W, panels, rdates,
                              fee_buy=spec.fee_buy, fee_sell=spec.fee_sell,
@@ -181,7 +203,7 @@ def main():
                     f"行数 {len(_nav_full)}→{len(_nav)} (drops {len(_nav_full) - len(_nav)})")
 
         out = RP.build_report(name, _nav, panels, rdates,
-                              res, outdir=OUT, factor_val=_fval, split=spec.split, spec=spec)
+                              res, outdir=OUT, factor_val=_fval, split=spec.split, spec=spec, bench_mask=pool.benchmark_mask())
 
         tv = [float(res[k]["turnover"].sum()) for k in range(len(res))]
         # 层号跟着 n_layers 走：原来写死"层4"，10 层时它其实是层9，日志会撒谎

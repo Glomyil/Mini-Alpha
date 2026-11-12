@@ -338,7 +338,8 @@ def t_stat_nw(series, lags: int | None = None) -> tuple[float, float]:
         return float("nan"), float("nan")
     if np.ptp(r) == 0.0:
         return float("nan"), float("nan")
-    se = newey_west_se(r, lags=lags)          # lags=0 时 newey_west_se 自己会退化成朴素 SE
+    # lags=0 时 newey_west_se 自己会退化成朴素 SE
+    se = newey_west_se(r, lags=lags)
     if not np.isfinite(se) or se <= 0:
         return float("nan"), float("nan")
     t = float(r.mean() / se)
@@ -408,7 +409,8 @@ def ls_summary(nav_df: pd.DataFrame, rdates, *, borrow_cost: float = 0.08,
     t, p = t_stat(diff)
     # 2026-11-11（T-3.7）：Newey-West 版并列。多空收益序列有自相关（行业轮动、
     #   风格切换都有惯性）⇒ 朴素 t 被系统性高估。两列都印，让读者自己看差多少。
-    _nw_lag = nw_lags(len(np.asarray(diff, dtype='float64')[np.isfinite(diff)]))
+    _nw_lag = nw_lags(
+        len(np.asarray(diff, dtype='float64')[np.isfinite(diff)]))
     t_nw, p_nw = t_stat_nw(diff, lags=_nw_lag)
 
     # ④ 多空夏普 / 最大回撤（2026-11-04 加）
@@ -466,7 +468,7 @@ def layer_table(nav_df: pd.DataFrame, results=None, rf: float = 0.0,
             _n_period = max(len(results[L]["turnover"]), 1)
             row["每期换手"] = row["累计换手"] / _n_period
             # ⚠️ 只含佣金/印花税。滑点被吃进成交价，体现在 nav 里，不记在这列
-            #（engine.py:185 buy_val = …*(1+slippage)，所以滑点成本在 cash 上就扣过了）。
+            # （engine.py:185 buy_val = …*(1+slippage)，所以滑点成本在 cash 上就扣过了）。
             row["佣金合计（不含滑点）"] = fee_total(results[L]["fees"])
         rows.append(row)
     return pd.DataFrame(rows).set_index("层")
@@ -508,8 +510,9 @@ def _blocked_pp(res, panels, periods_per_year: int):
     return float(np.nanmean(lost / nav)) * periods_per_year * 100
 
 
-def equal_weight_nav(panels):
-    r = panels["ret_1d_hfq"].where(panels["can_trade"])
+def equal_weight_nav(panels, mask=None):
+    _m = panels["can_trade"] if mask is None else (panels["can_trade"] & mask)
+    r = panels["ret_1d_hfq"].where(_m)
     daily = r.mean(axis=1).fillna(0.0)
     return (1.0 + daily).cumprod()
 

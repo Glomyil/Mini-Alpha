@@ -7,9 +7,20 @@ from backtest.metrics import rank1d
 from loguru import logger
 
 
-def build_target_weights(factor, rdates, can_trade, n_layers=5):
+def build_target_weights(factor, rdates, can_trade, n_layers=5, *, select=None):
+    """按因子值分 n_layers 层，返回 [(权重表, ...), 分层表]。
+
+    select：可选的【选股池】（点位2：invest_pool ∩ can_trade）。
+        None（默认）⇒ 行为与加这个参数之前一字不差。
+        收窄它只会让"可选范围"变小，**不会**改变可交易性。
+        例：沪深300 只有 300 只 ⇒ select 后池子占比 ~5%，
+        但 can_trade 仍是全市场的 73% ⇒ 下面的健康断言不能被它带偏。
+    """
     cols = factor.columns
     # --- health asserts (2026-10-13): data degradation must fail loudly ---
+    # ⚠️ 断言只看 can_trade（市场事实）。若改成看 select，把宇宙缩到 hs300 就会
+    #    误报 "can_trade True ratio 0.055 out of range"（实测踩过）——
+    #    那不是数据退化，是我们自己收窄了选股池。哨兵要留，尺子不能换。
     _ct = can_trade.to_numpy()
     assert _ct.size and _ct.any(
     ), f"can_trade all False ({can_trade.shape}) -- data degraded, refusing to compute weights"
@@ -17,12 +28,15 @@ def build_target_weights(factor, rdates, can_trade, n_layers=5):
         _r = float(_ct.mean())
         assert 0.4 < _r < 0.95, f"can_trade True ratio {_r:.3f} out of range (healthy ~0.73) -- data suspect"
 
+    # 选股池：can_trade ∩ select（select=None 时就是 can_trade）
+    _pool = can_trade if select is None else (can_trade & select)
+
     # --- pure numpy core: no pandas row-level .loc inside the loop (PITFALLS #23) ---
     # 每张表各 reindex 一次，然后拍成 C 连续的快照 —— 这之后全是纯 numpy，不再回到 pandas
     F = np.ascontiguousarray(
         factor.reindex(index=rdates, columns=cols).to_numpy(dtype="float64", copy=True))
     C = np.ascontiguousarray(
-        can_trade.reindex(index=rdates, columns=cols).fillna(False).to_numpy(dtype=bool, copy=True))
+        _pool.reindex(index=rdates, columns=cols).fillna(False).to_numpy(dtype=bool, copy=True))
 
     nT, nN = F.shape
     LAY = np.full((nT, nN), -1, dtype="int8")

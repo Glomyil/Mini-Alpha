@@ -56,6 +56,8 @@ class RunSpec:
     neutralize_drop_first: bool
     include_st: bool
     cfg_mtime:  str
+    universe_stage1: str = "all"
+    universe_stage2: str = "all"
 
     def fingerprint(self) -> str:
         parts = [
@@ -83,6 +85,16 @@ class RunSpec:
         # 股票池：只在【剔除 ST】时追加一段。默认含 ST ⇒ 指纹不动 ⇒ 历史 hash 继续可比
         if not self.include_st:
             parts.append("exclude_st=1")
+        # 样本空间两段（2026-11-12）。归一化规则：
+        #   stage1 一旦收窄，stage2 就【不可能宽于它】—— 因子值已 NaN，传不动；
+        #   所以 stage1=X 时，stage2=all 与 stage2=X 是同一件事 ⇒ 只能有一个 hash。
+        #   ⚠️ 不做这个归一化，两种等价配置会得到两个 hash ⇒ 台账上看起来是两次实验。
+        if self.universe_stage1 != "all":
+            parts.append(f"est_pool={self.universe_stage1}")
+            if self.universe_stage2 not in ("all", self.universe_stage1):
+                parts.append(f"inv_pool={self.universe_stage2}")
+        elif self.universe_stage2 != "all":
+            parts.append(f"inv_pool={self.universe_stage2}")
         return "|".join(parts)
 
     def banner(self) -> str:
@@ -90,6 +102,8 @@ class RunSpec:
                 f"费率:{self.fee_buy:.5f}/{self.fee_sell:.5f} 滑点:{self.slippage:.4f} "
                 f"层数:{self.n_layers} 年化:{self.trading_days}d universe:{self.universe} "
                 f"股票池:{('含ST' if self.include_st else '剔除ST')} "
+                # 2026-11-12：两个池分开印（stage1=估暴露，stage2=下注）
+                f"池:est={self.universe_stage1}|inv={self.universe_stage2} "
                 # ⚠️ 这里必须是 【字符串 + (三元表达式)】，不能把三元放最后：
                 #    if/else 的优先级【低于】隐式字符串拼接 ⇒
                 #    写成 "...{universe}" f"中性化..." if X else "中性化:关"
@@ -112,6 +126,9 @@ _RESEARCH_KEYS = frozenset({
     "since", "split", "fee_buy", "fee_sell", "slippage",
     "n_layers", "trading_days", "init_cash", "freq", "borrow_cost", "neutralize",
     "include_st",
+    # 2026-11-12：两个样本空间（点位1 / 点位2）。不在这里登记的话，yml 一写就
+    # 报「未知键」⇒ load_spec() 直接抛错（这就是上次 main 跑不起来的原因）。
+    "universe_stage1", "universe_stage2",
 })
 # 注意 periods_per_year 【不在此列】：它由 freq 推出，yml 里不该出现。
 # 真写了 ⇒ _check_research_keys 会报「未知键」，强制你去删掉它而不是让它静默覆盖映射表。
@@ -120,6 +137,10 @@ _RESEARCH_KEYS = frozenset({
 # 调仓频率 → 每年调仓次数（单一源头是 freq，N 从这里推）
 #   ME / QE 是精确值；W-FRI 用 52 近似（一年 52 周 + 1~2 天，实测 7 年 366 期 = 52.29/年）
 #   ⚠️ 只用 pandas ≥ 2.2 的新别名：M / Q 已废弃，会刷 FutureWarning
+# 样本空间的允许值。⚠️ 不 import data.index_snapshot（config 不该依赖数据层），
+#   两份白名单靠 qa/test_research_spec.py::test_pool_allowlist_matches_data_module 对齐。
+INDEX_UNIVERSES: tuple[str, ...] = ("all", "hs300", "zz500", "zz800", "sz50")
+
 _PERIODS_PER_YEAR = {"ME": 12, "QE": 4, "W-FRI": 52}
 
 # 调仓频率 → 报告里印的中文名。和 _PERIODS_PER_YEAR 放一起：频率的「意思」只有这一处说了算。
@@ -237,6 +258,8 @@ def load_spec(since: int | None = None, until: str = "-", **override) -> RunSpec
         neutralize_drop_first=bool(
             _g("neutralize.drop_first", NEUTRALIZE_DROP_FIRST)),
         include_st=bool(_g("include_st", INCLUDE_ST)),
+        universe_stage1=str(_g("universe_stage1", "all") or "all"),
+        universe_stage2=str(_g("universe_stage2", "all") or "all"),
     )
     vals.update(override)          # ★ 先合并 override，再推 freq / N
 
@@ -248,6 +271,10 @@ def load_spec(since: int | None = None, until: str = "-", **override) -> RunSpec
     if vals["neutralize_weight"] not in (None, "float_mv"):
         raise ValueError(
             f"neutralize.weight 只能是 null 或 float_mv，实际 {vals['neutralize_weight']!r}")
+    for _k in ("universe_stage1", "universe_stage2"):
+        if vals[_k] not in INDEX_UNIVERSES:
+            raise ValueError(
+                f"{_k} 只能是 {INDEX_UNIVERSES} 之一，实际 {vals[_k]!r}")
     if vals["neutralize_mv_floor"] < 0:
         raise ValueError(
             f"neutralize.mv_floor 不能为负，实际 {vals['neutralize_mv_floor']}")

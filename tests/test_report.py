@@ -70,7 +70,11 @@ meta = {"factor": "rev_20d", "start": idx[0].date(), "end": idx[-1].date(), "n_r
         "freq": "ME", "universe": "all",
         "fee_buy": 0.00025, "fee_sell": 0.00075, "slippage": 0.0005, "stamp": "20261012",
         # 2026-11-10（T-6.2）：banner 新增中性化口径行。硬索引 ⇒ 这里必须给键
-        "neutralize": False, "neutralize_exposures": (), "include_st": True}
+        "neutralize": False, "neutralize_exposures": (), "include_st": True,
+        # 2026-11-12（§5.3）：两个样本空间，硬索引 ⇒ 这里必须给键
+        "universe_stage1": "all", "universe_stage2": "all",
+        # 2026-11-12（§4.2）：基准池也是 banner 硬索引 ⇒ 替身必须给
+        "bench_pool": "all"}
 bn = RP.banner(meta)
 # 2026-11-10（T-6.2）：中性化口径必须出现在 banner 里，且能区分开/关
 check("中性化：**关**" in bn, "关闭时 banner 印「中性化：关」")
@@ -78,6 +82,14 @@ check("中性化：**关**" in bn, "关闭时 banner 印「中性化：关」")
 check("ST：含" in bn, "含 ST 时 banner 印「ST：含」")
 _bnX = RP.banner(dict(meta, include_st=False))
 check("ST：剔除" in _bnX and "ST：含" not in _bnX, "剔除 ST 时 banner 必须印「ST：剔除」")
+# 2026-11-12（§5.3）：两个池必须分开印 —— 只印一个「宇宙=hs300」等于没说
+check("estimation_pool=all" in bn and "invest_pool=all" in bn,
+      "默认两个池都印 all（不能省略）")
+_bnP = RP.banner(dict(meta, universe_stage1="all", universe_stage2="hs300"))
+check("invest_pool=hs300" in _bnP and "estimation_pool=all" in _bnP,
+      "点位2=hs300 时两个池都要印出来")
+_bnQ = RP.banner(dict(meta, universe_stage1="hs300", universe_stage2="all"))
+check("estimation_pool=hs300" in _bnQ, "点位1=hs300 也要印出来")
 _bnN = RP.banner(dict(meta, neutralize=True,
                       neutralize_exposures=("industry", "ln_float_mv")))
 check("横截面秩" in _bnN and "ln_float_mv" in _bnN,
@@ -234,6 +246,10 @@ class _FakeSpec:
         self.neutralize = False
         self.neutralize_exposures = ()
         self.include_st = True
+        # 2026-11-12（§5.3）：RunSpec 又加了两个池 ⇒ 替身必须同步，
+        # 否则 build_report 里硬索引 spec.universe_stage1 会 AttributeError（和上次中性化一模一样）
+        self.universe_stage1 = "all"
+        self.universe_stage2 = "all"
 
 # IC 要能真算出来，横截面必须 ≥ rank_ic 的 min_names(30)
 # ⇒ 造一个 40 只票的 fixture（价格按列各不相同，否则常数横截面会让 Spearman 抛断言）
@@ -269,6 +285,19 @@ for _code, _label, _ppy in (("QE", "季频", 4), ("W-FRI", "周频", 52)):
 check(abs(_ir_by_ppy[52] / _ir_by_ppy[4] - (52 / 4) ** 0.5) < 1e-9,
       f"IC-IR(52)/IC-IR(4) 必须 = √13 = {(52/4)**0.5:.4f}"
       f"（实测 {_ir_by_ppy[52]/_ir_by_ppy[4]:.4f}）")
+
+print("\n── ⑨ 基准必须跟宇宙走（§4.2）──")
+# bench_mask 全 False ⇒ 基准没有成分 ⇒ 基准浮动 0、年化 0.00%
+# 这条同时验两件事：bench_mask 真的进了报告；banner 印了基准池。
+_zero_mask = pd.DataFrame(False, index=idx, columns=list(range(_N60)))
+_o_bench = RP.build_report("rev_20d", _nav60, _pan60, rdates, None,
+                           outdir=TMP, factor_val=_fv60, spec=_FakeSpec("ME", 12),
+                           bench_mask=_zero_mask)
+_t_bench = _o_bench["md"].read_text(encoding="utf-8")
+check("基准池" in _t_bench, "banner 必须印出基准池（否则超额无法解释）")
+check(_t_bench != text3, "bench_mask 必须真的进入报告（文本应不同）")
+check("0.00%" in _t_bench,   # 报告里百分比不带 + 号（md_table 用 .2%）
+      "基准没有成分 ⇒ 基准年化必须是 0.00%（不能缺行）")
 
 print("=" * 46)
 print(f"  ✅ 断言条数守卫：{n_assert} 条")

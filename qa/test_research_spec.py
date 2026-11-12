@@ -149,3 +149,56 @@ def test_caller_since_beats_yml(monkeypatch):
     assert R.load_spec().since == 2020, "yml 有值时应当用 yml"
     assert R.load_spec(since=2018).since == 2018, "调用方显式给了 => 不许被 yml 盖掉"
     assert R.load_spec(since=2016).since == 2016, "传 2016 也要生效（不是'用默认'）"
+
+
+# ── T7 宇宙两字段（2026-11-12 §5.2）─────────────────────────
+# 设计：estimation_pool（点位1）/ invest_pool（点位2），代码里叫 stage1/stage2。
+# 关键不变式：est 一旦收窄，invest 就【不可能宽于它】（因子值已 NaN ⇒ 传不动）
+#   ⇒ est=hs300 时，invest=all 与 invest=hs300 是同一件事，hash 必须相同。
+def test_pool_default_keeps_hash_unchanged():
+    """默认 all/all ⇒ 指纹一个字都不加（历史 hash 继续可比）"""
+    a = R.load_spec(**SPEC_A, universe_stage1="all", universe_stage2="all")
+    b = R.load_spec(**SPEC_A)
+    assert a.cfg_hash == b.cfg_hash
+    assert "est_pool" not in a.fingerprint()
+    assert "inv_pool" not in a.fingerprint()
+
+
+def test_pool_invest_only_appends_one_segment():
+    base = len(R.load_spec(**SPEC_A).fingerprint().split("|"))
+    s = R.load_spec(**SPEC_A, universe_stage1="all", universe_stage2="hs300")
+    assert len(s.fingerprint().split("|")) == base + 1
+    assert "inv_pool=hs300" in s.fingerprint()
+
+
+def test_pool_estimation_appends_and_normalizes_invest():
+    """est 收窄后：invest=all 与 invest=est 结果等价 ⇒ 必须同一个 hash"""
+    base = len(R.load_spec(**SPEC_A).fingerprint().split("|"))
+    a = R.load_spec(**SPEC_A, universe_stage1="hs300", universe_stage2="all")
+    b = R.load_spec(**SPEC_A, universe_stage1="hs300", universe_stage2="hs300")
+    assert len(a.fingerprint().split("|")) == base + 1
+    assert "est_pool=hs300" in a.fingerprint()
+    assert a.cfg_hash == b.cfg_hash, "est=hs300 时 inv=all 与 inv=hs300 是同一件事"
+
+
+def test_pool_narrower_invest_appends_two_segments():
+    base = len(R.load_spec(**SPEC_A).fingerprint().split("|"))
+    a = R.load_spec(**SPEC_A, universe_stage1="hs300", universe_stage2="all")
+    c = R.load_spec(**SPEC_A, universe_stage1="hs300", universe_stage2="zz500")
+    assert len(c.fingerprint().split("|")) == base + 2
+    assert c.cfg_hash != a.cfg_hash
+
+
+def test_pool_rejects_unknown_universe():
+    with pytest.raises((ValueError, KeyError)):
+        R.load_spec(**SPEC_A, universe_stage1="hs999")
+    with pytest.raises((ValueError, KeyError)):
+        R.load_spec(**SPEC_A, universe_stage2="zz1000")
+
+
+def test_pool_allowlist_matches_data_module():
+    """config 不 import data（避免反向依赖），靠这条测试保证两份白名单不分叉"""
+    import data.index_snapshot as D
+    # "all" 是 config 侧的哨兵（不读快照），不在 loader 的 INDEX_CODES 里；
+    # 剩下四个真实指数必须一一对应。
+    assert tuple(x for x in R.INDEX_UNIVERSES if x != "all") == tuple(D.INDEX_CODES)

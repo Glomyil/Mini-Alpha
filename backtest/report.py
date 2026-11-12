@@ -59,6 +59,13 @@ def banner(meta: dict) -> str:
         f"> - 股票池：{universe_label(meta['universe'])}"
         # ST 口径必须印出来 —— 含还是不含，超额能差 0.4~0.9pp、波动能差 1.2pp
         f" ｜ ST：{'?' if meta['include_st'] is None else ('含' if meta['include_st'] else '剔除')}",
+        # 2026-11-12（§5.3）：两个样本空间必须分开印。
+        #   只印一个「宇宙=hs300」回答不了「拿谁估暴露、在谁身上下注」这两个不同问题。
+        #   硬索引：缺键就该 KeyError（本函数其余字段同一纪律）。
+        f"> - 样本空间：**estimation_pool={meta['universe_stage1']}"
+        f"  ｜ invest_pool={meta['universe_stage2']}**（可交易性另计：can_trade）",
+        # 基准池必须印出来：否则「超额」这一列没人能解释（和它比的是谁？）
+        f"> - 基准池：**{meta['bench_pool']}**（等权、每日再平衡）",
         f"> - 净值口径：**{meta['val_basis']}**（收盘 / 开盘两套，另一套作诊断）｜ 成交：**T+1 开盘**（缺价即不成交）",
         f"> - 年化常数：**{meta['trading_days']}** 交易日/年（A 股；252 是美股）｜ IC-IR 用 {meta['periods_per_year']} 期/年",
         f"> - 成本：佣金 {meta['fee_buy']}/{meta['fee_sell']} ｜ 滑点 {meta['slippage']}（单边）｜ 无整手",
@@ -118,7 +125,7 @@ def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲�
 
 def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Path = OUT,
                  val_basis: str = "close", note: str = "", factor_val=None,
-                 split: str = "", spec=None) -> dict:
+                 split: str = "", spec=None, bench_mask=None) -> dict:
     # ★ trading_days 是唯一源头：报告表头、年化、波动、夏普、层差全用它。
     #   不传的话 metrics 会退回自己的 244 常量 ⇒ 表头印 252 但数字按 244 算（PITFALLS #19）。
     _td = spec.trading_days if spec else MT.TRADING_DAYS
@@ -127,7 +134,10 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
     # ── T-3.1 基准线：全 A 等权（每日再平衡、未扣费，基准偏高 => 超额偏保守）──
     _bench = None
     if panels is not None and "ret_1d_hfq" in panels and "can_trade" in panels:
-        _bench = MT.equal_weight_nav(panels).reindex(nav_df.index).ffill()
+        # 2026-11-12（§4.2）：基准必须和实际下注范围同一个池。
+        #   不传 mask 就是全A等权 ⇒ 拿大盘组合去比小盘基准，
+        #   超额会被系统性吞掉（实测：hs300 组合 +6.55% 而超额印 −0.92%）。
+        _bench = MT.equal_weight_nav(panels, mask=bench_mask).reindex(nav_df.index).ffill()
         # 归一化到 1.0：它从 2015 年累乘起，直接叠到 2016 起的 nav 上会从 1.6 开始。
         # 年化不受影响（ann_return 是相对算的），但图上起点不一致等于骗人 ✗
         _bench = _bench / float(_bench.iloc[0])
@@ -191,6 +201,11 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
             "neutralize_exposures": tuple(spec.neutralize_exposures) if spec else (),
             # 股票池口径（T-6.3）：不传 spec 时不猜「含 ST」，给 None 让 banner 印 ?
             "include_st": (bool(spec.include_st) if spec else None),
+            # 样本空间两个池（2026-11-12）。不传 spec 时给 "?" —— 和 freq/universe 同一条纪律：不猜。
+            "universe_stage1": (spec.universe_stage1 if spec else "?"),
+            "universe_stage2": (spec.universe_stage2 if spec else "?"),
+            # 基准池：与实际下注范围一致；不传 mask 时就是全A等权
+            "bench_pool": ("all" if bench_mask is None else "同实际下注范围"),
             "stamp": stamp}
 
     parts = [f"# 因子回测报告 · `{factor}`", "", banner(meta), ""]
