@@ -36,6 +36,9 @@ INCLUDE_ST = True
 class RunSpec:
     since:     int
     until:     str
+    # OOS 切点（2026-11-13）：训练段/验证段的分界日。空 = 未启用。
+    #   ⚠️ 它与 split 不同：split 只切【报告分段表】，cut 是【样本集分界】。
+    cut:   str
     split:     str
     freq:      str
     borrow_cost: float
@@ -95,12 +98,16 @@ class RunSpec:
                 parts.append(f"inv_pool={self.universe_stage2}")
         elif self.universe_stage2 != "all":
             parts.append(f"inv_pool={self.universe_stage2}")
+        # OOS 切点：非空才追加。空 = 未启用 => 默认指纹不变，历史 hash 继续可比
+        if self.cut:
+            parts.append(f"cut={self.cut}")
         return "|".join(parts)
 
     def banner(self) -> str:
         return (f"spec:{self.cfg_hash} 区间:{self.since}+ 到 {self.until} "
                 f"费率:{self.fee_buy:.5f}/{self.fee_sell:.5f} 滑点:{self.slippage:.4f} "
                 f"层数:{self.n_layers} 年化:{self.trading_days}d universe:{self.universe} "
+                f"cut:{self.cut or 'off'} "
                 f"股票池:{('含ST' if self.include_st else '剔除ST')} "
                 # 2026-11-12：两个池分开印（stage1=估暴露，stage2=下注）
                 f"池:est={self.universe_stage1}|inv={self.universe_stage2} "
@@ -128,7 +135,7 @@ _RESEARCH_KEYS = frozenset({
     "include_st",
     # 2026-11-12：两个样本空间（点位1 / 点位2）。不在这里登记的话，yml 一写就
     # 报「未知键」⇒ load_spec() 直接抛错（这就是上次 main 跑不起来的原因）。
-    "universe_stage1", "universe_stage2",
+    "universe_stage1", "universe_stage2", "until", "cut",
 })
 # 注意 periods_per_year 【不在此列】：它由 freq 推出，yml 里不该出现。
 # 真写了 ⇒ _check_research_keys 会报「未知键」，强制你去删掉它而不是让它静默覆盖映射表。
@@ -215,7 +222,7 @@ def _check_neutralize_keys(config) -> None:
             f"实际是 {type(raw['enabled']).__name__}: {raw['enabled']!r}")
 
 
-def load_spec(since: int | None = None, until: str = "-", **override) -> RunSpec:
+def load_spec(since: int | None = None, until: str | None = None, **override) -> RunSpec:
     """读一次配置并冻结成 RunSpec。override 仅供测试注入。
 
     取值优先级：override > application.yml > 代码常量。
@@ -235,10 +242,16 @@ def load_spec(since: int | None = None, until: str = "-", **override) -> RunSpec
 
     # 调用方显式给了 => 用它；否则看 yml；再否则用代码常量
     _since = since if since is not None else _g("since", 2016)
+    _raw_until = until if until is not None else _g("until", "auto")
+    _cut = str(_g("cut", "") or "").strip()
 
     vals = dict(
         since=_since,
-        until=until,
+        # 2026-11-13：优先级 override > yml > "auto"。
+        #   ⚠️ 必须先看 yml —— 只登记了 _RESEARCH_KEYS 却不读，就是又一个
+        #   "看起来能控、实际不控"的死字段（PITFALLS #29/#31 同一类）。
+        until=("auto" if _raw_until in (None, "", "-") else str(_raw_until)),
+        cut=_cut,
         split=_g("split", ""),
         borrow_cost=float(_g("borrow_cost", 0.08)),
         fee_buy=_g("fee_buy", FEE_BUY),
@@ -271,6 +284,26 @@ def load_spec(since: int | None = None, until: str = "-", **override) -> RunSpec
     if vals["neutralize_weight"] not in (None, "float_mv"):
         raise ValueError(
             f"neutralize.weight 只能是 null 或 float_mv，实际 {vals['neutralize_weight']!r}")
+    if vals["until"] == "@cut":        # until 可引用 cut，避免日期抄两遍
+        if not vals["cut"]:
+            raise ValueError("until=@cut 但 research.cut 为空")
+        vals["until"] = vals["cut"]
+    if vals["cut"]:
+        try:
+            _c = datetime.strptime(vals["cut"], "%Y-%m-%d").date()
+        except ValueError as e:
+            raise ValueError('cut 不是合法日期（YYYY-MM-DD）: %r' % vals['cut']) from e
+        if _c.year < int(vals["since"]):
+            raise ValueError('cut=%s 早于 since=%s' % (_c, vals['since']))
+    if vals["until"] != "auto":
+        _ut = vals["until"]
+        try:
+            _u = datetime.strptime(_ut, "%Y-%m-%d").date()
+        except ValueError as e:
+            raise ValueError(f"until 不是合法日期（YYYY-MM-DD）：{_ut!r}") from e
+        if _u.year < int(vals["since"]):
+            raise ValueError(
+                f"until={_u} 早于 since={vals['since']} —— 区间为空")
     for _k in ("universe_stage1", "universe_stage2"):
         if vals[_k] not in INDEX_UNIVERSES:
             raise ValueError(

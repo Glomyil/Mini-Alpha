@@ -13,8 +13,13 @@ def test_main_slices_nav_before_report():
     """main.py 必须有 nav.loc[rdates[0]:] 切片，且在【哨兵之后】【build_report 之前】。"""
     src = (ROOT / "main.py").read_text(encoding="utf-8")
 
-    m = re.search(r"\.loc\[\s*rdates\[0\]\s*:\]", src)
-    assert m, "main.py 里找不到 .loc[rdates[0]:] —— T-1.1 的切片被删了？"
+    # 2026-11-12（#11）：切片换成 slice_nav（两头都切）
+    # 2026-11-13：切片抽进 build_factor_nav 之后，锚点改成「切片日志行」。
+    #   守卫真正在乎的是【坏结果不该先打切片日志】，
+    #   而日志现在位于哨兵之后 ⇒ 盯日志行才盯得住。
+    assert re.search(r"MT\.slice_nav\(", src), "main.py 里找不到 MT.slice_nav( —— 净值切片被删了？"
+    m = re.search(r"指标起算日", src)
+    assert m, "main.py 里找不到 nav 切片日志行"
 
     i_slice = m.start()
     # 2026-11-10（T-6.2）：锚点从 "build_report" 收紧成 "RP.build_report("。

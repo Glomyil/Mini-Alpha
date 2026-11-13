@@ -217,6 +217,28 @@ check(abs(float(_n_bsel.iloc[-1]) - 1.0) < 1e-12,
       f"mask 剔掉 A ⇒ 只剩 B(0) ⇒ {float(_n_bsel.iloc[-1]):.4f}（手算 1.0）")
 check(abs(float(_n_all.iloc[-1]) - float(_n_bsel.iloc[-1])) > 1e-6, "mask 必须真的改变基准")
 
+print("\n── slice_nav：截断必须真的截（#11）──")
+# 2026-11-12 实测病患：engine 的净值永远跑满整块面板（engine.py:58），
+# rdates 只决定“哪天换仓”。而 main 只切了头。
+# ⇒ “跑到某天为止”之前不成立；这里钉住“截尾真的生效”。
+_sn_idx = pd.date_range("2020-01-06", periods=6, freq="B")
+_sn = pd.Series([1.0, 1.05, 1.10, 1.08, 1.12, 1.15], index=_sn_idx)
+_vi = MT.slice_nav(_sn, start=_sn_idx[0], until=None)
+check(_vi.equals(_sn), "until=None ⇒ 与原序列逐位相同（不截尾）")
+_vc = MT.slice_nav(_sn, start=_sn_idx[0], until=_sn_idx[2])
+check(list(_vc.index) == list(_sn_idx[:3]),
+      f"until=第 3 天 ⇒ 只到第 3 天（实测 {len(_vc)} 行）")
+check(float(_vc.iloc[-1]) == 1.10, f"末值必须是第 3 天的 1.10（实测 {float(_vc.iloc[-1])}）")
+_vh = MT.slice_nav(_sn, start=_sn_idx[1], until=_sn_idx[3])
+check(list(_vh.index) == list(_sn_idx[1:4]), "同时给 start 与 until ⇒ 两头都切")
+_vb = MT.slice_nav(_sn, start=_sn_idx[0], until="2099-12-31")
+check(list(_vb.index) == list(_sn_idx), "until 超过数据末日 ⇒ 钳到最后一天（不报错）")
+try:
+    MT.slice_nav(_sn, start=_sn_idx[3], until=_sn_idx[1])
+    check(False, "until 早于 start ⇒ 竟然没报错")
+except ValueError:
+    check(True, "until 早于 start ⇒ ValueError（不许静默返回空）")
+
 print("\n" + "=" * 46)
 print('\n── ⑧ 被白吃的 alpha（T-2.4）：被挡的单子错过了多少 ──')
 # 手工造的假 res —— 不跑 engine，纯测数学 ✓

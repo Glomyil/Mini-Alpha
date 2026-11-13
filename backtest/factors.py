@@ -19,8 +19,11 @@ FACTORS = {
     "rev_20d":    {"fn": lambda f, p: f["ret_20"], "sign": -1,
                    "needs": [("ret", {"n": 20})], "note": "20日反转"},
 
-    "mom_120d":   {"fn": lambda f, p: f["ret_120"], "sign": +1,
-                   "needs": [("ret", {"n": 120})], "note": "120日动量（sign=+1 与反转类相反：它是反向因子，用来验相关性小表）"},
+    # 2026-11-13：sign 由 +1 改为 −1。实测 IC 全负（README:426 −0.04414；
+    #   四档池 −0.040/−0.074，中性化后仍为负）⇒ 在 A 股 120 日窗口它是【反转】不是动量。
+    #   改后因子值 = −ret_120，与 rev_* 同族（只是窗口更长）⇒ 名字里的 mom 是历史包袱。
+    "mom_120d":   {"fn": lambda f, p: f["ret_120"], "sign": -1,
+                   "needs": [("ret", {"n": 120})], "note": "120日反转（原按动量用，实测方向相反）"},
 
     "vol_20d":    {"fn": lambda f, p: f["vol_20"], "sign": -1,
                    "needs": [("vol", {"n": 20})], "requires": ["ret_1d_hfq"], "note": "20天价格波动率"},

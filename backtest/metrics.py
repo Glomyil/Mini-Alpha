@@ -510,6 +510,29 @@ def _blocked_pp(res, panels, periods_per_year: int):
     return float(np.nanmean(lost / nav)) * periods_per_year * 100
 
 
+def slice_nav(nav, *, start=None, until=None):
+    """按日期切净值的两头。只切【展示与指标口径】，不改回测本身。
+
+    为什么必须有 until（PITFALLS #31：看起来在控区间的参数，实际不控）
+        engine 的净值永远跑满整块面板（engine.py:58 days = 整块面板），
+        rdates 只决定“哪天换仓”，不决定“跑到哪天”。
+        所以“回测到某天为止”必须在净值层切尾巴，否则多出来的持仓漂移会摊进年化
+        （实测：让训练段停在 2023-10，实际跑到 2026-10 ⇒ 5.57%/年 被压成 2.96%/年）。
+
+    until 超过数据末日 ⇒ 钳到最后一个可用点（不报错）。
+    until 早于 start ⇒ ValueError（不许静默返回空序列）。
+    """
+    out = nav
+    if start is not None:
+        out = out.loc[pd.Timestamp(start):]
+    if until is not None:
+        u = pd.Timestamp(until)
+        if start is not None and u < pd.Timestamp(start):
+            raise ValueError(
+                f"until={u.date()} 早于 start={pd.Timestamp(start).date()} —— 区间为空")
+        out = out.loc[:u]
+    return out
+
 def equal_weight_nav(panels, mask=None):
     _m = panels["can_trade"] if mask is None else (panels["can_trade"] & mask)
     r = panels["ret_1d_hfq"].where(_m)

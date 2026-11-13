@@ -26,6 +26,7 @@ from backtest.weights import build_target_weights, weights_for_factor
 from backtest.engine import run_all_layers, nav_frame
 from backtest.factors import FACTORS
 from backtest import report as RP
+from backtest import metrics as MT
 from backtest.neutralize import neutralize
 from loguru import logger
 from config.research_spec import load_spec, save_snapshot
@@ -65,12 +66,69 @@ def _apply_pool_mask(f: pd.DataFrame, keep: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(v, index=f.index, columns=f.columns)
 
 
+def build_factor_nav(name, panels, spec, rdates, pool):
+    """跑完【计算内核】并返回净值：因子 → 点位1 → ST → 中性化 → 点位2 → 权重 → 引擎 → 切两头。
+
+    为什么抽成函数（2026-11-13）：
+        主链（main）和 ops/oos_compare 必须共用同一份管线。
+        各写一份 = 两套口径：main 改了点位顺序、工具不会跟着改，
+        于是「OOS 结论」和「日常回测结论」可能来自不同算法 —— 这比算错更难发现。
+
+    不包含的（留在调用方）：
+        · 换手哨兵（那是「要不要出报告」的决策，不是计算）
+        · 报告生成、日志、进度打印
+
+    返回 dict: fval / W / res / nav / nav_full
+    """
+    _sp = FACTORS[name]
+    _fval = _sp["fn"](build_features(panels, [name]), {}) * _sp["sign"]
+
+    # ── 点位1：panel → 权重（estimation_pool）──
+    #   放在因子值出来之后、中性化之前：同时决定
+    #    ①哪些票进中性化回归的样本（估 beta） ②哪些票有因子值
+    _fval = _apply_pool_mask(_fval, pool.estimation_pool)
+
+    # 股票池口径：剔除 ST —— 因子值的【前置操作】，必须在一切消费之前。
+    #   置 NaN 而不是改 can_trade：ST 股现实中能买卖，标成不可交易会让
+    #   已持仓变 ST 的票「卖不掉」（假），还会污染 can_trade 这个市场事实字段。
+    if not spec.include_st:
+        # 逐格写（PITFALLS #24）。用 .where() 会碰那个偶发出错的出口。
+        _fv = np.array(_fval.to_numpy(dtype="float64"), copy=True)
+        _fv[panels["is_st"].to_numpy()] = np.nan
+        _fval = pd.DataFrame(_fv, index=_fval.index, columns=_fval.columns)
+
+    # 中性化必须在 build_target_weights 与 build_report【之前】：
+    #   _fval 是唯一的因子值来源，同时流向 ①权重 ②报告（报告内部调 rank_ic）。
+    if spec.neutralize:
+        _fval = neutralize(_fval, panels, rdates,
+                           exposures=spec.neutralize_exposures,
+                           mv_floor=spec.neutralize_mv_floor,
+                           weight=spec.neutralize_weight,
+                           drop_first=spec.neutralize_drop_first)
+
+    # ── 点位2：中性化 → 引擎（invest_pool）──
+    #   必须在权重之前：它决定「在哪些票里下注」（选股 / IC / 报告样本）。
+    #   不接这一步：universe_stage2 只改 cfg_hash、不改结果 ⇒ 口径撒谎。
+    _fval = _apply_pool_mask(_fval, pool.invest_pool)
+
+    W, _ = build_target_weights(_fval, rdates, pool.can_trade,
+                                n_layers=spec.n_layers, select=pool.selectable())
+    res = run_all_layers(W, panels, rdates,
+                         fee_buy=spec.fee_buy, fee_sell=spec.fee_sell,
+                         slippage=spec.slippage, init_cash=spec.init_cash)
+
+    _nav_full = nav_frame(res)
+    # #11：两头都要切。engine 的净值永远跑满整块面板（engine.py:58），
+    #   rdates 只决定「哪天换仓」。不切尾 ⇒「跑到某天为止」不成立。
+    _until = None if spec.until in ("auto", "-") else spec.until
+    _nav = MT.slice_nav(_nav_full, start=rdates[0], until=_until)
+    return {"fval": _fval, "W": W, "res": res, "nav": _nav, "nav_full": _nav_full}
 def main():
     # 运行前先证明"这次用的是哪份配置"
     config_check()
     init_log()                                                    # 关键数字落盘（日志教学参考 §5）
     panels = load_panels()  # 缓存提到循环外
-    spec = load_spec(until=str(panels["hfq_close"].index[-1].date()))
+    spec = load_spec()   # #12：until 不再由面板末日填充（否则 hash 随数据漂移）
     save_snapshot(spec)
     logger.info(f"RUN {spec.banner()}")
 
@@ -80,6 +138,16 @@ def main():
                 f"shape:{panels['hfq_close'].shape}")
     rdates = [d for d in rebalance_dates(
         panels["hfq_close"].index, rule=spec.freq) if d.year >= spec.since]
+
+    # 2026-11-13（#11）：until 必须【同时】截调仓日与净值尾巴，两件事都要做。
+    #   只切净值不切 rdates ⇒ ls_summary 里 _period_returns 大面积 NaN 直接断言失败
+    #   （实测：净值切到 2023-10-31 但 rdates 仍 130 个 ⇒ 36/129 期 NaN）。
+    if spec.until not in ("auto", "-"):
+        _u = pd.Timestamp(spec.until)
+        rdates = [d for d in rdates if d <= _u]
+        if not rdates:
+            raise ValueError(
+                f"until={spec.until} 之前没有调仓日（since={spec.since}）—— 区间为空")
 
     logger.info(f"RUN SINCE:{spec.since} 首个调仓日:{rdates[0].date()} 调仓:{len(rdates)}期 "
                 f"因子:{len(FACTORS)} panel:{_fp} shape:{panels['hfq_close'].shape}")
@@ -93,49 +161,9 @@ def main():
         if missing:                                               # 软失败：记下来、继续
             print(f"skipped  ⚠ 面板缺 {missing}")
             continue
-        _spec = FACTORS[name]
-        _fval = _spec["fn"](build_features(panels, [name]), {}) * _spec["sign"]
-
-        # ── 点位1：panel → 权重（estimation_pool）──
-        #   放在因子值出来之后、中性化之前：这一步同时决定
-        #    ①哪些票进中性化回归的样本（估 beta） ②哪些票有因子值
-        _fval = _apply_pool_mask(_fval, pool.estimation_pool)
-        # 股票池口径：剔除 ST（T-6.3）—— 因子值的【前置操作】，必须在一切消费之前。
-        #   置 NaN 而不是改 can_trade：ST 股现实中能买卖，把它标成不可交易会让
-        #   已持仓变 ST 的票「卖不掉」（假），还会污染 can_trade 这个市场事实字段。
-        #   置 NaN 之后下游四处自动一致：中性化样本 / 权重 / rank_ic / 报告。
-        if not spec.include_st:
-            # 逐格写（PITFALLS #24：写入权不许外包给库）。用 .where() 会碰那个偶发出错的出口。
-            _fv = np.array(_fval.to_numpy(dtype="float64"), copy=True)   # 一次快照
-            _st = panels["is_st"].to_numpy()
-            # 整片写，不逐格循环
-            _fv[_st] = np.nan
-            _fval = pd.DataFrame(_fv, index=_fval.index, columns=_fval.columns)
-
-        # 中性化（T-6.2）必须在这里 —— 在 build_target_weights 和 build_report【之前】：
-        #   _fval 是唯一的因子值来源，它同时流向 ①权重 ②报告（报告内部调 rank_ic）。
-        #   在这一行改，两者一起吃；
-        #   若插在权重算完【之后】，权重仍是 raw 的、只有报告被中性化
-        #   ⇒ 报告说「中性化后 IC 更高」但净值/分层根本没变，自相矛盾 ✗
-        if spec.neutralize:
-            _fval = neutralize(_fval, panels, rdates,
-                               exposures=spec.neutralize_exposures,
-                               mv_floor=spec.neutralize_mv_floor,
-                               weight=spec.neutralize_weight,
-                               drop_first=spec.neutralize_drop_first)
-
-        # ── 点位2：中性化 → 引擎（invest_pool）──
-        #   必须在权重之前：它决定「在哪些票里下注」（选股 / IC / 报告样本）。
-        #   不接这一步的后果：universe_stage2 只改 cfg_hash、不改结果
-        #   ⇒ 口径声明与实际计算不一致（比起算错，这种更难发现）。
-        _fval = _apply_pool_mask(_fval, pool.invest_pool)
-
-        W, _ = build_target_weights(_fval, rdates, pool.can_trade,
-                                    n_layers=spec.n_layers, select=pool.selectable())
-
-        res = run_all_layers(W, panels, rdates,
-                             fee_buy=spec.fee_buy, fee_sell=spec.fee_sell,
-                             slippage=spec.slippage, init_cash=spec.init_cash)
+        _r = build_factor_nav(name, panels, spec, rdates, pool)
+        _fval, W, res = _r["fval"], _r["W"], _r["res"]
+        _nav, _nav_full = _r["nav"], _r["nav_full"]
 
         # —— 哨兵（2026-10-13 建，2026-11-03 改）：换手塌陷才拒绝出报告 ——
         # 第三代判据：【年化换手】= 累计换手 ÷ 年数。为什么换了两次：
@@ -196,12 +224,10 @@ def main():
                 f"共 {_n_period} 期 ≈ {_years:.2f} 年，freq={spec.freq}）"
                 f"-- result untrusted (possible nondeterministic data corruption, "
                 f"PITFALLS #23); refusing to report")
-        _nav_full = nav_frame(res)
-        _nav = _nav_full.loc[rdates[0]:]  # ★ 唯一的新增：首个成交日之前的空仓期不进指标
+
         logger.info(f"nav 切片 {_nav_full.index[0].date()}~{_nav_full.index[-1].date()} "
                     f"=> 指标起算日 {_nav.index[0].date()} "
                     f"行数 {len(_nav_full)}→{len(_nav)} (drops {len(_nav_full) - len(_nav)})")
-
         out = RP.build_report(name, _nav, panels, rdates,
                               res, outdir=OUT, factor_val=_fval, split=spec.split, spec=spec, bench_mask=pool.benchmark_mask())
 
