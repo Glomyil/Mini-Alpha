@@ -49,6 +49,23 @@ CLEANER_DAILY_DIR: Path = DATA_STORAGE / "cleaner_daily"
 # FACTOR_DIR: Path = DATA_STORAGE / "factors"
 
 # ==============================
+# 财务（基本面）数据目录（2026-11-13 新增，T-6.2）
+# 每只股票一文件：data/storage/fundamental/{table}/{code}.parquet
+#   table ∈ profit / growth / balance / operation / cashflow
+# ==============================
+
+FUNDAMENTAL_DIR: Path = DATA_STORAGE / "fundamental"
+
+# 下载进度账本（断点续传 + 每日预算记账）
+FUNDAMENTAL_STATE_FILE: Path = DATA_STORAGE / "fundamental_state.json"
+
+# 每日请求预算（baostock 官方上限 5 万，留 2 千余量）
+FUNDAMENTAL_DAILY_BUDGET: int = 48000
+
+# 逐季请求间隔（秒，含抖动；比 K 线的 0.6 稍快，因为财报单次负载极小）
+FUNDAMENTAL_SLEEP: float = 0.25
+
+# ==============================
 # 日志目录（2026-09-10 新增：原先散落在各脚本里硬编码）
 # ==============================
 
