@@ -7,9 +7,13 @@
 """
 from __future__ import annotations
 
+import types
+
 import numpy as np
+import pandas as pd
 import pytest
 
+import ops.oos_compare as OC
 from ops.oos_compare import _rho_and_p
 
 
@@ -77,3 +81,71 @@ def test_rho_and_ci_are_in_range():
         assert -1.0 - 1e-12 <= v <= 1.0 + 1e-12
     assert 0.0 <= p <= 1.0
     assert lo <= hi
+
+
+# ────────────────── ③④a 的多空口径（算法 v2，2026-11-17） ──────────────────
+# 旧实现把「层9净值 ÷ 层0净值」的比值序列 pct_change 后喂给 t_stat_nw。
+# 那个序列 = 收益差 /(1+r_弱)，分母随期变化 ⇒ 给「弱腿下跌」的期加权、
+# 系统性抬高 t。下面两条测试把它钉死。
+
+def _nav_two_layers():
+    """7 期月频：最弱层持续暴跌、最强层缓涨 —— 两种口径在这里分道扬镳。"""
+    dates = pd.date_range("2020-01-31", periods=7, freq="ME")
+    return pd.DataFrame({
+        0: [1.00, 0.88, 0.70, 0.52, 0.60, 0.45, 0.38],
+        1: [1.00, 1.03, 1.07, 1.05, 1.12, 1.15, 1.21],
+    }, index=dates)
+
+
+def _patch_stats_seam(monkeypatch, nav):
+    """只替换 _stats 的上游（净值 / IC），让被测的那一段保持真身。"""
+    monkeypatch.setattr(
+        OC, "build_factor_nav",
+        lambda *a, **k: {"nav": nav,
+                         "fval": pd.DataFrame(1.0, index=nav.index,
+                                              columns=nav.columns)})
+    monkeypatch.setattr(OC.MT, "rank_ic",
+                        lambda *a, **k: pd.Series([0.1] * (len(nav) - 1)))
+    monkeypatch.setattr(OC.MT, "ic_summary",
+                        lambda *a, **k: {"ic_mean": 0.05, "ic_ir": 0.4})
+
+
+def test_stats_long_short_t_is_the_period_return_difference(monkeypatch):
+    """③多空 t 必须等于 metrics.ls_summary 的「多空t_nw」（收益差口径）。
+
+    旧实现走净值比 ⇒ 这条会红，所以它同时是「确实换了口径」的证据。
+    """
+    nav = _nav_two_layers()
+    _patch_stats_seam(monkeypatch, nav)
+    rd = list(nav.index)
+    spec = types.SimpleNamespace(periods_per_year=12)
+
+    got = OC._stats("x", None, spec, rd, None)
+
+    want = OC.MT.ls_summary(nav.loc[rd], rd,
+                            periods_per_year=12)["多空t_nw"]
+    assert got["t_nw"] == pytest.approx(want, rel=1e-12)
+    assert got["p_t"] == pytest.approx(
+        OC.MT.ls_summary(nav.loc[rd], rd, periods_per_year=12)["多空p_nw"],
+        rel=1e-12)
+
+
+def test_stats_long_short_t_is_not_the_ratio_method(monkeypatch):
+    """反证：比值法的 t 与 v2 的 t 不是同一个数（防「改成空操作」）。
+
+    这条在旧实现上【必红】—— 因为旧实现返回的正是右边这个 ratio_t。
+    """
+    nav = _nav_two_layers()
+    _patch_stats_seam(monkeypatch, nav)
+    rd = list(nav.index)
+    spec = types.SimpleNamespace(periods_per_year=12)
+
+    got = OC._stats("x", None, spec, rd, None)["t_nw"]
+
+    top, bot = nav[nav.columns[-1]], nav[nav.columns[0]]
+    ratio = ((top / top.iloc[0]) / (bot / bot.iloc[0])).pct_change().dropna()
+    ratio_t, _ = OC.MT.t_stat_nw(ratio.to_numpy())
+
+    assert abs(got - ratio_t) > 0.05, (
+        f"v2 的 t ({got:.4f}) 与比值法的 t ({ratio_t:.4f}) 几乎相同 —— "
+        f"口径没真的换掉？")

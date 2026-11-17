@@ -5,6 +5,9 @@
   ② IC-IR     验证 ≥ 0.5 × 训练
   ③ 多空 t    验证段 t_nw ≥ 1.5
   ④ p         双条件：p(多空t) < 0.05 且 p(形状重合ρ) < 0.05
+  ③④a 的 t 与 p 都作用在【调仓期收益差】r_T − r_B 上（复用 metrics.ls_summary），
+       不是净值比 (T/T0)/(B/B0)。后者等于「收益差 /(1+r_弱)」，会给弱腿下跌的
+       期加权 ⇒ 抬高多空均值与 t（判定为算法 v1 的缺陷，2026-11-17 改为 v2）
   ⑤ IC 同号   两段 IC 均值同号
   已删除：分层单调（实测 6/6 因子二次项 c<0 为鼓形，与该判据要求反向）
 
@@ -53,12 +56,15 @@ def _stats(name, panels, spec, rd, pool):
     ic = MT.rank_ic(f, panels, use)
     s = MT.ic_summary(ic, periods_per_year=spec.periods_per_year)
     R, _ = _period_rets(nav, use)
-    pr = nav.loc[use]
-    top, bot = pr[pr.columns[-1]], pr[pr.columns[0]]
-    ls = (top / top.iloc[0]) / (bot / bot.iloc[0])
-    ls_r = ls.pct_change().dropna().to_numpy()
-    t_nw, p_t = MT.t_stat_nw(ls_r) if ls_r.size > 2 else (
-        float("nan"), float("nan"))
+
+    # ③④a 的输入序列 = 调仓期【收益差】r_T − r_B，不是净值比 (T/T0)/(B/B0)。
+    #   比值法序列 = 收益差 /(1+r_弱)，分母随期变化 ⇒ 给「弱腿下跌」的期加权，
+    #   系统性抬高多空均值与 t；累计口径 ∏(1+r_T)/∏(1+r_B) 也不是多空 P&L。
+    #   这里不重写一遍复利 —— 直接复用 metrics.ls_summary：报告 §5、banner、
+    #   GLOSSARY 用的是同一份实现（口径单一来源，2026-11-17 修正「算法 v2」）。
+    _ls = MT.ls_summary(nav.loc[use], use,
+                        periods_per_year=spec.periods_per_year)
+    t_nw, p_t = float(_ls["多空t_nw"]), float(_ls["多空p_nw"])
     return {
         "n": len(use),
         "ic": float(s["ic_mean"]),
@@ -186,6 +192,8 @@ def main() -> None:
     print("  切点 %s → 训练末 %s ｜ %d 层 ｜ 训练 %d 期 / 验证 %d 期"
           % (cut.date(), train_rd[-1].date(), args.layers, len(train_rd), len(valid_rd)))
     print("  两段 spec 校验 ✓（只差 %s）" % ", ".join(keys))
+    print("  多空口径：差法 r_T − r_B（算法 v2）"
+          "｜ v1 用的是净值比，会给弱腿下跌的期加权 ⇒ t 偏高")
     print()
     print("  因子          ①方向  ②IC-IR   ③多空t  ④a p    ④b p    ⑤同号  判决")
     print("  " + "-" * 76)
