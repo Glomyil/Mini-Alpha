@@ -84,3 +84,15 @@ BASELINE.md
 
 # 术语表是过程产物，随时会改，不入库
 GLOSSARY.md
+
+# ---- 对外分享前的临时收口（2026-11-17 加；对方下载完就删掉这一节改回去）----
+# ⚠️ 下面 5 条里有 4 条是【已被 git 跟踪】的，光写在这里不生效，
+#    还要 git rm --cached 才会真的从仓库里消失（本地文件不动）。
+#    只有 pytest-cache-files-*/ 是未跟踪的垃圾目录，加 ignore 就够。
+# ⚠️ PITFALLS.md / TECH_DEBT.md 被代码引用 67 处、README 有 4 个链接，
+#    藏掉后这些引用会指空。改回来时记得清理。
+pytest-cache-files-*/
+sandbox/out/
+开发日志.md
+PITFALLS.md
+TECH_DEBT.md
