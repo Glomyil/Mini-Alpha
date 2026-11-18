@@ -37,6 +37,8 @@ def _report_fixture(with_panels=False):
     if with_panels:
         panels = {
             "hfq_close": pd.DataFrame(np.full((40, 1), 10.0), index=idx, columns=[0]),
+            # T-6.3：rank_ic 的标签自 T+1 开盘起算，需要 hfq_open
+            "hfq_open": pd.DataFrame(np.full((40, 1), 10.0), index=idx, columns=[0]),
             "can_trade": pd.DataFrame(True, index=idx, columns=[0]),
             "ret_1d_hfq": pd.DataFrame(np.full((40, 1), 0.001), index=idx, columns=[0]),
         }
@@ -53,7 +55,8 @@ def test_empty_split_produces_no_segment_section(tmp_path):
     """
     nav_df, panels, rdates, fval, _ = _report_fixture()
     out = RP.build_report("rev_20d", nav_df, panels, rdates, None,
-                          outdir=tmp_path, factor_val=fval, split="")
+                          outdir=tmp_path, factor_val=fval, split="",
+                          nav_open_df=nav_df)   # T-6.3：多空期收益自 T+1 开盘起算
     text = out["md"].read_text(encoding="utf-8")
 
     assert "## 2. 分段对比" not in text, "split 为空却出了分段节"
@@ -75,7 +78,8 @@ def test_nonempty_split_produces_segment_section(tmp_path):
     nav_df, panels, rdates, fval, idx = _report_fixture()
     cut = idx[20].strftime("%Y-%m-%d")          # fixture 区间内，不是区间外
     out = RP.build_report("rev_20d", nav_df, panels, rdates, None,
-                          outdir=tmp_path, factor_val=fval, split=cut)
+                          outdir=tmp_path, factor_val=fval, split=cut,
+                          nav_open_df=nav_df)   # T-6.3：多空期收益自 T+1 开盘起算
     text = out["md"].read_text(encoding="utf-8")
 
     assert "## 2. 分段对比" in text, f"split={cut} 却没出分段节"

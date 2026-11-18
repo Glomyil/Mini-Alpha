@@ -55,14 +55,16 @@ def _stats(name, panels, spec, rd, pool):
     use = [d for d in rd if d in nav.index]
     ic = MT.rank_ic(f, panels, use)
     s = MT.ic_summary(ic, periods_per_year=spec.periods_per_year)
-    R, _ = _period_rets(nav, use)
+    # ④b 的层收益形状也要与 ③④a 同源（T-6.3）：自成交日（T+1）起算
+    _ex = MT.exec_dates(use, r["nav_open_full"].index)
+    R, _ = _period_rets(r["nav_open_full"], _ex)
 
     # ③④a 的输入序列 = 调仓期【收益差】r_T − r_B，不是净值比 (T/T0)/(B/B0)。
     #   比值法序列 = 收益差 /(1+r_弱)，分母随期变化 ⇒ 给「弱腿下跌」的期加权，
     #   系统性抬高多空均值与 t；累计口径 ∏(1+r_T)/∏(1+r_B) 也不是多空 P&L。
     #   这里不重写一遍复利 —— 直接复用 metrics.ls_summary：报告 §5、banner、
     #   GLOSSARY 用的是同一份实现（口径单一来源，2026-11-17 修正「算法 v2」）。
-    _ls = MT.ls_summary(nav.loc[use], use,
+    _ls = MT.ls_summary(nav.loc[use], r["nav_open_full"], use,
                         periods_per_year=spec.periods_per_year)
     t_nw, p_t = float(_ls["多空t_nw"]), float(_ls["多空p_nw"])
     return {

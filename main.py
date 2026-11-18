@@ -23,7 +23,7 @@ from pathlib import Path
 from backtest.panel import load_panels
 from backtest.assemble import build_features, rebalance_dates
 from backtest.weights import build_target_weights, weights_for_factor
-from backtest.engine import run_all_layers, nav_frame
+from backtest.engine import run_all_layers, nav_frame, nav_frame_basis
 from backtest.factors import FACTORS
 from backtest import report as RP
 from backtest import metrics as MT
@@ -122,7 +122,12 @@ def build_factor_nav(name, panels, spec, rdates, pool):
     #   rdates 只决定「哪天换仓」。不切尾 ⇒「跑到某天为止」不成立。
     _until = None if spec.until in ("auto", "-") else spec.until
     _nav = MT.slice_nav(_nav_full, start=rdates[0], until=_until)
-    return {"fval": _fval, "W": W, "res": res, "nav": _nav, "nav_full": _nav_full}
+    # T-6.3：IC 标签与多空期收益自 T+1 开盘起算，需要开盘净值序列。
+    #   ⚠️ 这里【不切尾】：最后一个调仓日的成交日是它的【下一个交易日】，
+    #   切了尾就找不到它 ⇒ 白丢一期（train 段 48 -> 47 期）。
+    _nav_open_full = nav_frame_basis(res, "open")
+    return {"fval": _fval, "W": W, "res": res, "nav": _nav, "nav_full": _nav_full,
+            "nav_open_full": _nav_open_full}
 def main():
     # 运行前先证明"这次用的是哪份配置"
     config_check()
@@ -229,7 +234,9 @@ def main():
                     f"=> 指标起算日 {_nav.index[0].date()} "
                     f"行数 {len(_nav_full)}→{len(_nav)} (drops {len(_nav_full) - len(_nav)})")
         out = RP.build_report(name, _nav, panels, rdates,
-                              res, outdir=OUT, factor_val=_fval, split=spec.split, spec=spec, bench_mask=pool.benchmark_mask())
+                              res, outdir=OUT, factor_val=_fval, split=spec.split,
+                              spec=spec, bench_mask=pool.benchmark_mask(),
+                              nav_open_df=_r["nav_open_full"])
 
         tv = [float(res[k]["turnover"].sum()) for k in range(len(res))]
         # 层号跟着 n_layers 走：原来写死"层4"，10 层时它其实是层9，日志会撒谎

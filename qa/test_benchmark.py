@@ -101,6 +101,8 @@ def _report_fixture(with_panels):
     if with_panels:
         panels = {
             "hfq_close": pd.DataFrame(np.full((40, 1), 10.0), index=idx, columns=[0]),
+            # T-6.3：rank_ic 的标签自 T+1 开盘起算，需要 hfq_open
+            "hfq_open": pd.DataFrame(np.full((40, 1), 10.0), index=idx, columns=[0]),
             "can_trade": pd.DataFrame(True, index=idx, columns=[0]),
             "ret_1d_hfq": pd.DataFrame(np.full((40, 1), 0.001), index=idx, columns=[0]),
         }
@@ -113,7 +115,8 @@ def test_report_contains_benchmark_columns(tmp_path):
     """panels 齐全 => 第 1 节必须有「基准年化」和「超额」两列。"""
     nav_df, panels, rdates, fval = _report_fixture(with_panels=True)
     out = RP.build_report("rev_20d", nav_df, panels, rdates, None,
-                          outdir=tmp_path, factor_val=fval)
+                          outdir=tmp_path, factor_val=fval,
+                          nav_open_df=nav_df)   # T-6.3
     text = out["md"].read_text(encoding="utf-8")
 
     assert "基准年化" in text, "报告第 1 节缺「基准年化」列"
@@ -125,7 +128,8 @@ def test_report_says_missing_when_no_panels(tmp_path):
     """panels=None => 报告写「缺基准数据」（ROADMAP 明确要求，不许静默跳过）。"""
     nav_df, _, rdates, fval = _report_fixture(with_panels=False)
     out = RP.build_report("rev_20d", nav_df, None, rdates, None,
-                          outdir=tmp_path, factor_val=fval)
+                          outdir=tmp_path, factor_val=fval,
+                          nav_open_df=nav_df)   # T-6.3
     text = out["md"].read_text(encoding="utf-8")
 
     assert "缺基准数据" in text, "没有基准数据时报告应当明说，而不是整列消失"

@@ -102,6 +102,8 @@ def _patch_stats_seam(monkeypatch, nav):
     monkeypatch.setattr(
         OC, "build_factor_nav",
         lambda *a, **k: {"nav": nav,
+                         # T-6.3：IC 标签与多空期收益都吃开盘净值
+                         "nav_open_full": nav,
                          "fval": pd.DataFrame(1.0, index=nav.index,
                                               columns=nav.columns)})
     monkeypatch.setattr(OC.MT, "rank_ic",
@@ -122,11 +124,11 @@ def test_stats_long_short_t_is_the_period_return_difference(monkeypatch):
 
     got = OC._stats("x", None, spec, rd, None)
 
-    want = OC.MT.ls_summary(nav.loc[rd], rd,
+    want = OC.MT.ls_summary(nav.loc[rd], nav, rd,
                             periods_per_year=12)["多空t_nw"]
     assert got["t_nw"] == pytest.approx(want, rel=1e-12)
     assert got["p_t"] == pytest.approx(
-        OC.MT.ls_summary(nav.loc[rd], rd, periods_per_year=12)["多空p_nw"],
+        OC.MT.ls_summary(nav.loc[rd], nav, rd, periods_per_year=12)["多空p_nw"],
         rel=1e-12)
 
 

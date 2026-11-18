@@ -79,35 +79,58 @@ check(near(MT.turnover_total(tv), 0.75), "累计换手 = 0.75")
 check(near(MT.fee_total(fe), 0.003), "累计费用 = 0.003")
 check(near(MT.turnover_ann(tv, navA), 0.75 / (len(navA) / TD), 1e-12), "年化换手 = 累计 ÷ 年数")
 
-print("── ④ IC：同序 +1 / 反序 −1 / 无关 0.2、0.8 / 截面不足跳过 ──")
-pidx = pd.DatetimeIndex(["2021-01-29", "2021-02-26", "2021-03-31"])
+print("── ④ IC：同序 +1 / 反序 −1 / 无关 0.2、1.0 / 截面不足跳过 ──")
+# T-6.3：标签自 T+1 开盘起算（open(成交日) -> open(下一成交日)），
+#   所以夹具必须【多一天尾巴】，否则最后一个调仓日没有成交日、白丢一期。
+#   四行 open 的有效值是 O[1..3]：期1 用 O[1]->O[2]，期2 用 O[2]->O[3]。
+pidx = pd.DatetimeIndex(["2021-01-29", "2021-02-26", "2021-03-31", "2021-04-30"])
 codes = ["A", "B", "C", "D"]
-close = pd.DataFrame(10.0, index=pidx, columns=codes)
-close.loc["2021-02-26"] = [20.0, 15.0, 12.0, 11.0]      # 收益 A > B > C > D
-close.loc["2021-03-31"] = [30.0, 20.0, 14.0, 12.0]      # 区间收益仍是 A > B > C > D
+
+open_mono = pd.DataFrame(10.0, index=pidx, columns=codes)
+open_mono.loc["2021-02-26"] = [20.0, 15.0, 12.0, 11.0]   # 期1 = O[1]->O[2]：+100/+50/+20/+10% => A>B>C>D
+open_mono.loc["2021-03-31"] = [30.0, 21.0, 15.6, 12.65]  # 期2 = O[2]->O[3]：+50/+40/+30/+15% => A>B>C>D
+open_mono.loc["2021-04-30"] = [45.0, 29.4, 20.28, 14.5475]  # 尾行：从 O[2] 起 +50/+40/+30/+15% => A>B>C>D
 ok = pd.DataFrame(True, index=pidx, columns=codes)
-panels_ic = {"hfq_close": close, "can_trade": ok}
+panels_ic = {"hfq_close": open_mono, "hfq_open": open_mono, "can_trade": ok}
 f_same = pd.DataFrame({"A": [4.0, 4.0], "B": [3.0, 3.0], "C": [2.0, 2.0], "D": [1.0, 1.0]}, index=pidx[:2])
 
 ic_same = MT.rank_ic(f_same, panels_ic, pidx, min_names=3)
-check(len(ic_same) == 2, f"IC 期数 = 调仓日数 − 1 = {len(ic_same)}")
+check(len(ic_same) == 2, f"IC 期数 = 调仓日数 − 1 = {len(ic_same)}（开盘口径不能丢期）")
 check(bool((ic_same - 1.0).abs().max() < 1e-12), f"因子与未来收益同序 → IC = +1（{list(ic_same.round(4))}）")
 
 f_rev = pd.DataFrame({"A": [1.0, 1.0], "B": [2.0, 2.0], "C": [3.0, 3.0], "D": [4.0, 4.0]}, index=pidx[:2])
 ic_rev = MT.rank_ic(f_rev, panels_ic, pidx, min_names=3)
 check(bool((ic_rev + 1.0).abs().max() < 1e-12), f"反序 → IC = −1（{list(ic_rev.round(4))}）")
 
-close2 = close.copy()
-close2.loc["2021-02-26"] = [20.0, 11.0, 12.0, 15.0]      # 收益序变成 A > D > C > B
-ic_none = MT.rank_ic(f_same, {"hfq_close": close2, "can_trade": ok}, pidx, min_names=3)
-# 手算（Spearman ρ = 1 − 6Σd²/(n(n²−1))，n = 4）：第 1 期 Σd² = 8 → 0.2；第 2 期 Σd² = 2 → 0.8
+# 无关截面：期1 收益序 A>D>C>B（Σd²=8 → ρ=0.2）；期2 收益序 A>B>C>D（ρ=1）
+open_none = pd.DataFrame(10.0, index=pidx, columns=codes)   # O[1] = 10s，作为期1 的基准
+open_none.loc["2021-03-31"] = [20.0, 11.0, 12.0, 15.0]   # 期1 = O[1]->O[2]：+100/+10/+20/+50% => A>D>C>B
+open_none.loc["2021-04-30"] = [30.0, 20.0, 14.0, 12.0]   # 期2 = O[2]->O[3]：+50/+81.8/+16.7/−20% => B>A>C>D
+ic_none = MT.rank_ic(f_same, {"hfq_close": open_none, "hfq_open": open_none, "can_trade": ok},
+                     pidx, min_names=3)
+# 手算（ρ = 1 − 6Σd²/(n(n²−1))，n = 4）：期1 Σd² = 8 → 0.2；期2 Σd² = 0 → 1.0
 check(near(float(ic_none.iloc[0]), 0.2, 1e-12) and near(float(ic_none.iloc[1]), 0.8, 1e-12),
       f"无关截面：手算 ρ = 0.2 / 0.8，实测 {list(ic_none.round(4))}")
 
 ok_masked = ok.copy()
-ok_masked.loc["2021-01-29", "D"] = False
-ic_skip = MT.rank_ic(f_same, {"hfq_close": close, "can_trade": ok_masked}, pidx, min_names=4)
+# T-6.3：可交易性掩码挪到【成交日】。掩在 01-29（信号日）已不再影响任何一期。
+ok_masked.loc["2021-02-26", "D"] = False
+ic_skip = MT.rank_ic(f_same, {"hfq_close": open_mono, "hfq_open": open_mono,
+                              "can_trade": ok_masked}, pidx, min_names=4)
 check(len(ic_skip) == 1, "截面不足 min_names → 该期跳过（不算、也不报错）")
+
+def _open_for(nav_df):
+    """开盘净值夹具：收盘净值 + 一行尾巴（外推末段增速）。
+
+    T-6.3 之后 ls_summary 必需 nav_open_df，且成交日是调仓日的【下一个交易日】——
+    不补这一行，最后一个调仓日就找不到成交日、白丢一期。
+    """
+    step = nav_df.iloc[-1] / nav_df.iloc[-2]
+    nxt = nav_df.index[-1] + (nav_df.index[-1] - nav_df.index[-2])
+    extra = pd.DataFrame([nav_df.iloc[-1].to_numpy() * step.to_numpy()],
+                         index=[nxt], columns=nav_df.columns)
+    return pd.concat([nav_df, extra])
+
 
 print("── ⑤ 多空：标准复利三口径（期望值全部来自恒等式/手算，不用实现重算）──")
 # 2026-11-03 T-3.4：删掉 ls_ratio / ls_diff / ls_month（比值法是净值比不是收益、
@@ -120,7 +143,7 @@ midx = pd.date_range("2020-01-31", periods=13, freq="ME")
 # 12 期：层0 全程不动，层4 每期 +1%
 nav_ok = pd.DataFrame({L: np.ones(13) for L in range(5)}, index=midx)
 nav_ok[4] = 1.01 ** np.arange(13)
-ls = MT.ls_summary(nav_ok, midx, borrow_cost=0.08, periods_per_year=12)
+ls = MT.ls_summary(nav_ok, _open_for(nav_ok), midx, borrow_cost=0.08, periods_per_year=12)
 exp_cum = 1.01 ** 12 - 1.0
 check(near(ls["多空累计"], exp_cum, 1e-12),
       f"多空累计 = 1.01^12−1（手算 {exp_cum:.8f}，实测 {ls['多空累计']:.8f}）")
@@ -133,15 +156,17 @@ check(ls["层差(pp)"] > 0.0, f"层4 涨、层0 平 ⇒ 层差必须 > 0（实�
 
 # 恒等式：两层净值完全相同 ⇒ 层差恰好 0、多空累计恰好 0
 nav_flat = pd.DataFrame({L: np.ones(13) for L in range(5)}, index=midx)
-ls_flat = MT.ls_summary(nav_flat, midx, periods_per_year=12)
+ls_flat = MT.ls_summary(nav_flat, _open_for(nav_flat), midx, periods_per_year=12)
 check(abs(ls_flat["层差(pp)"]) < 1e-12, "两层净值相同 ⇒ 层差必须恰好 0")
 check(abs(ls_flat["多空累计"]) < 1e-12, "两层净值相同 ⇒ 多空累计必须恰好 0")
 
 # t 值手算：diff = [+2%, 0%, +1%] ⇒ mean=.01, sd(ddof=1)=.01, t = .01/(.01/√3) = √3
-tidx = pd.date_range("2020-01-31", periods=4, freq="ME")
-nav_t = pd.DataFrame({L: np.ones(4) for L in range(5)}, index=tidx)
-nav_t[4] = [1.0, 1.02, 1.02, 1.02 * 1.01]
-ls_t = MT.ls_summary(nav_t, tidx, periods_per_year=12)
+# T-6.3：期收益走 open，所以 O[1..4] = [1.0, 1.02, 1.02, 1.0302] 才给出这三期差值。
+tidx = pd.date_range("2020-01-31", periods=5, freq="ME")
+nav_t = pd.DataFrame({L: np.ones(4) for L in range(5)}, index=tidx[:4])
+nav_t_open = pd.DataFrame({L: np.ones(5) for L in range(5)}, index=tidx)
+nav_t_open[4] = [1.0, 1.0, 1.02, 1.02, 1.0302]
+ls_t = MT.ls_summary(nav_t, nav_t_open, tidx[:4], periods_per_year=12)
 check(near(ls_t["多空t"], 3 ** 0.5, 1e-9),
       f"t = √3 = {3 ** 0.5:.6f}（手算），实测 {ls_t['多空t']:.6f}")
 check(near(ls_t["多空p"], MT._norm_p(3 ** 0.5), 1e-12), "p = 正态近似(t=√3)")
@@ -185,7 +210,12 @@ check(near(float(tab.loc[4, "最大回撤"]), MT.max_drawdown(_navL), 1e-12)
       "layer_table 的值与单指标函数一致")
 
 # ls_summary 的键集合变了（比值法/日差法/月差法 → 三口径 + t/p + 期数）
-lsv = MT.ls_summary(nav_df, [_navL.index[0], _navL.index[-1]])
+# T-6.3：期收益走 open(成交日)。两个调仓日的成交日是 index[1] 与 index[3]，
+#   所以开盘夹具需要 4 行，且 O[1]=1.0 为基准、O[3] 多头 1.2 / 空头 0.9。
+_open_2pt = pd.DataFrame({0: [1.0, 1.0, 0.95, 0.90],
+                          4: [1.0, 1.0, 1.10, 1.20]},
+                         index=pd.date_range("2020-01-01", periods=4, freq="B"))
+lsv = MT.ls_summary(nav_df, _open_2pt, [_navL.index[0], _navL.index[-1]])
 # 2026-11-11（T-3.7）：加 Newey-West 三件套（t / p / lags）——
 #   多空收益序列有自相关，朴素 t 被系统性高估，所以两列必须都出。
 check(set(lsv) == {'层差(pp)', '多空年化', '多空累计', '多空净年化', '多空t', '多空p',
@@ -287,7 +317,7 @@ check(np.isnan(_sf["ic_ir"]), f"IC 恒定 ⇒ IC-IR 必须 NaN（实测 {_sf['ic
 #    净值 1.0 → 1.1 → 0.88 → 0.968   峰 1.1、谷 0.88 ⇒ 回撤 = 0.88/1.1 − 1 = −20%（精确）
 _midx = pd.date_range("2020-01-31", periods=4, freq="ME")
 _nv = pd.DataFrame({0: np.ones(4), 4: np.array([1.0, 1.10, 0.88, 0.968])}, index=_midx)
-_ls = MT.ls_summary(_nv, list(_midx), periods_per_year=12)
+_ls = MT.ls_summary(_nv, _nv, list(_midx), periods_per_year=12)
 check(near(_ls["多空最大回撤"], -0.20, 1e-12),
       f"多空最大回撤 = 0.88/1.1 − 1 = −20%（实测 {_ls['多空最大回撤']:.6f}）")
 check(-1.0 <= _ls["多空最大回撤"] <= 0.0, "回撤必须落在 [−1, 0]")
@@ -295,14 +325,14 @@ check(-1.0 <= _ls["多空最大回撤"] <= 0.0, "回撤必须落在 [−1, 0]")
 # ── 多空夏普：每期收益恒定 ⇒ 标准差 0 ⇒ 必须是 NaN（不许 inf）──
 _nv2 = pd.DataFrame({0: np.ones(13), 4: 1.01 ** np.arange(13)},
                     index=pd.date_range("2020-01-31", periods=13, freq="ME"))
-_ls2 = MT.ls_summary(_nv2, list(_nv2.index), periods_per_year=12)
+_ls2 = MT.ls_summary(_nv2, _nv2, list(_nv2.index), periods_per_year=12)
 check(np.isnan(_ls2["多空夏普"]), f"每期恒定收益 ⇒ 多空夏普必须 NaN（实测 {_ls2['多空夏普']}）")
 
 # ── 等均值但带波动 ⇒ 复利拖累 ⇒ 多空年化和夏普都必须是负的 ──
 _r = np.array([0.02, -0.02] * 6)                      # 12 期，算术均值 0
 _nv3 = pd.DataFrame({0: np.ones(13), 4: np.concatenate([[1.0], np.cumprod(1 + _r)])},
                     index=pd.date_range("2020-01-31", periods=13, freq="ME"))
-_ls3 = MT.ls_summary(_nv3, list(_nv3.index), periods_per_year=12)
+_ls3 = MT.ls_summary(_nv3, _nv3, list(_nv3.index), periods_per_year=12)
 check(_ls3["多空年化"] < 0, f"算术均值 0 + 波动 ⇒ 复利为负（实测 {_ls3['多空年化']:.4%}）")
 check(_ls3["多空夏普"] < 0, "同样的道理 ⇒ 夏普必须为负")
 

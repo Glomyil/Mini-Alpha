@@ -125,7 +125,8 @@ def nav_plot(nav_df: pd.DataFrame, path: Path, *, title: str = "分层净值曲�
 
 def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Path = OUT,
                  val_basis: str = "close", note: str = "", factor_val=None,
-                 split: str = "", spec=None, bench_mask=None) -> dict:
+                 split: str = "", spec=None, bench_mask=None,
+                 nav_open_df=None) -> dict:
     # ★ trading_days 是唯一源头：报告表头、年化、波动、夏普、层差全用它。
     #   不传的话 metrics 会退回自己的 244 常量 ⇒ 表头印 252 但数字按 244 算（PITFALLS #19）。
     _td = spec.trading_days if spec else MT.TRADING_DAYS
@@ -151,8 +152,17 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
     # freq 是唯一源头：年化粒度用 spec 的 periods_per_year，不写死 12
     _bc = spec.borrow_cost if spec else 0.08
     _ppy = spec.periods_per_year if spec else MT.REBALANCE_PERIODS_PER_YEAR
-    ls = MT.ls_summary(nav_df, rdates, borrow_cost=_bc, periods_per_year=_ppy,
-                       trading_days=_td)
+    # T-6.3：多空期收益自 T+1 开盘起算。开盘净值缺失时从 res 现算（不静默回落收盘）。
+    if nav_open_df is None:
+        if isinstance(res, (list, tuple)) and res and "nav_open" in res[0]:
+            from backtest.engine import nav_frame_basis
+            nav_open_df = nav_frame_basis(res, "open")
+        else:
+            raise ValueError(
+                "build_report 需要开盘净值序列（T-6.3）：传 nav_open_df，或带上含 "
+                "'nav_open' 的 res —— 不要静默回落到收盘口径（DEBT-011）")
+    ls = MT.ls_summary(nav_df, nav_open_df, rdates, borrow_cost=_bc,
+                       periods_per_year=_ppy, trading_days=_td)
 
     ic = ic_sum = None
     if panels is not None and factor is not None:
@@ -325,9 +335,10 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
               "| :-- | --: | --: | :-- |",
               # ⚠️ 层差的单位是【百分点】不是百分比：0.1489 要印成 "+14.89 pp"，
               #   不能印成 "+14.89%"（那会被读成"涨了 14.89%"）。这正是本票在治的口径误读。
-              f"| 层差（pp） | {ls['层差(pp)'] * 100:+.2f} pp | — | 两个独立多头组合，不做空 |",
+              f"| 层差（pp） | {ls['层差(pp)'] * 100:+.2f} pp | — "
+              f"| 两个独立多头组合，不做空；按**收盘净值**年化（与 §1 同源）|",
               f"| 多空（零成本） | {ls['多空年化']:+.2%} | {ls['多空累计']:+.2%} "
-              f"| 每期再平衡、零成本做空、券源无限 |",
+              f"| 自 **T+1 开盘**起算、每期再平衡、零成本做空 |",
               f"| **多空净** | **{ls['多空净年化']:+.2%}** | — "
               f"| 扣 {_bc:.0%}/年融券费 |",
               "",
@@ -343,7 +354,9 @@ def build_report(factor, nav_df, panels, rdates, res=None, *, rf=0.0, outdir: Pa
               f"> 配对 t（Newey-West, lag={ls['nw_lags']}）= "
               f"**{_t_nw_txt}** ｜ p = **{_p_nw_txt}**",
               _nw_note_t,
-              "> 「层差」是两个年化率相减（pp），**不存在累计口径**，所以那格写「—」。", ""]
+              "> 「层差」是两个年化率相减（pp），**不存在累计口径**，所以那格写「—」。",
+              "> 两行窗口差一个交易日：层差止于 until；多空按成交日（T+1）起算，"
+              "走到 until 之后一期 —— 这是 T-6.3 的有意设计，不是错位。", ""]
     # 零依赖版 Spearman（pandas 那个要 scipy，requirements 里没有 ✗）
     mono = MT.spearman_rank(
         layer_tab["年化"].tolist(), list(range(len(layer_tab))))

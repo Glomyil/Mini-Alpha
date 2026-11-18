@@ -118,7 +118,8 @@ check("XX" in _bnX and "月频" not in _bnX, "未知 freq ⇒ 原样印代码，
 check("收盘估值" not in bn, "口径声明不再硬编码「收盘估值」（改为读 meta['val_basis']）")
 
 print("── ③ build_report：一站式出报告（无 panels / 无 res）──")
-out = RP.build_report("rev_20d", nav_df, None, rdates, None, outdir=TMP)
+out = RP.build_report("rev_20d", nav_df, None, rdates, None, outdir=TMP,
+                      nav_open_df=nav_df)   # T-6.3：多空期收益自 T+1 开盘起算
 check(out["md"].exists(), f"md 已生成：{out['md'].name}")
 check(out["png"].exists() and out["png"].stat().st_size > 10_000,
       f"png 已生成且 > 10 KB（实测 {out['png'].stat().st_size / 1024:.0f} KB）")
@@ -136,7 +137,8 @@ check(f"{v_cum:+.2%}" in text, f"多空累计 {v_cum:+.2%} 出现在报告里")
 check("比值法" not in text, "报告里不该再出现「比值法」（T-3.4 删掉的误导口径）")
 
 print("── ⑤ 可复现：同一输入跑两次 → 文本逐字节相同 ──")
-out2 = RP.build_report("rev_20d", nav_df, None, rdates, None, outdir=TMP)
+out2 = RP.build_report("rev_20d", nav_df, None, rdates, None, outdir=TMP,
+                       nav_open_df=nav_df)
 check(out2["md"].read_text(encoding="utf-8") == text, "两次生成的 md 完全一致")
 
 print("── ⑥ res=None 时不该出现换手/费用列 ──")
@@ -146,7 +148,10 @@ print("── ⑦ nav 含 NaN → 报错（透传 metrics 守卫，别在 report
 nav_bad = nav_df.copy()
 nav_bad.iloc[3, 0] = np.nan
 try:
-    RP.build_report("rev_20d", nav_bad, None, rdates, None, outdir=TMP)
+    # T-6.3：必须传 nav_open_df，否则异常由「缺开盘序列」触发 —— 那样这条就变成假绿，
+    #   验不到「nav 含 NaN 必须报错」这件事本身了。
+    RP.build_report("rev_20d", nav_bad, None, rdates, None, outdir=TMP,
+                    nav_open_df=nav_bad)
     check(False, "含 NaN 的 nav 应当报错，但没报")
 except ValueError:
     check(True, "含 NaN 的 nav → ValueError ✓")
@@ -189,8 +194,10 @@ _panels = {"hfq_close": _flat, "hfq_open": _flat,
 # 而且不能用全 0 —— 常数横截面会让 Spearman 算不出来、直接抛断言 ✗
 _fv = pd.DataFrame(np.random.RandomState(0).randn(len(idx), 1),
                    index=idx, columns=[0])
+# _one 只是账本（turnover/fees/blocked_*），没有 nav_open 键 ⇒ 开盘序列必须显式给
 out3 = RP.build_report("rev_20d", nav_df, _panels, rdates,
-                       [_one] * 5, outdir=TMP, factor_val=_fv)
+                       [_one] * 5, outdir=TMP, factor_val=_fv,
+                       nav_open_df=nav_df)
 check("## 0. 成交失败" in out3["md"].read_text(encoding="utf-8"),
       "有 res 时报告首屏出现「## 0. 成交失败」")
 
@@ -267,7 +274,8 @@ _nav60 = pd.DataFrame({0: np.linspace(1.0, 0.9, len(idx)),
 _ir_by_ppy = {}
 for _code, _label, _ppy in (("QE", "季频", 4), ("W-FRI", "周频", 52)):
     _o = RP.build_report("rev_20d", _nav60, _pan60, rdates, None,
-                         outdir=TMP, factor_val=_fv60, spec=_FakeSpec(_code, _ppy))
+                         outdir=TMP, factor_val=_fv60, spec=_FakeSpec(_code, _ppy),
+                         nav_open_df=_nav60)
     _t = _o["md"].read_text(encoding="utf-8")
     check(f"调仓：{_label}" in _t, f"spec.freq={_code} ⇒ 报告 banner 写「{_label}」")
     check("月频" not in _t, f"spec.freq={_code} ⇒ 报告里不许出现「月频」")
@@ -292,7 +300,7 @@ print("\n── ⑨ 基准必须跟宇宙走（§4.2）──")
 _zero_mask = pd.DataFrame(False, index=idx, columns=list(range(_N60)))
 _o_bench = RP.build_report("rev_20d", _nav60, _pan60, rdates, None,
                            outdir=TMP, factor_val=_fv60, spec=_FakeSpec("ME", 12),
-                           bench_mask=_zero_mask)
+                           bench_mask=_zero_mask, nav_open_df=_nav60)
 _t_bench = _o_bench["md"].read_text(encoding="utf-8")
 check("基准池" in _t_bench, "banner 必须印出基准池（否则超额无法解释）")
 check(_t_bench != text3, "bench_mask 必须真的进入报告（文本应不同）")

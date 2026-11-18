@@ -238,7 +238,20 @@ def nav_frame(results: list[dict]) -> pd.DataFrame:
     返回     : DataFrame(交易日 × 5)，列名 = 层号 —— 这就是下游统一称呼的 `nav_df`【二维】
                单层那一维在 res[L]["nav"] 里【一维】，两者别混（《数据契约》规则 6）
     """
-    return pd.DataFrame({i: r["nav"] for i, r in enumerate(results)})
+    return nav_frame_basis(results, "close")
+
+
+def nav_frame_basis(results: list[dict], basis: str = "close") -> pd.DataFrame:
+    """同 nav_frame，但可选 basis="open"（取 nav_open 序列）。
+
+    为什么需要（T-6.3）：IC 标签与多空期收益都自 T+1 开盘起算，必须吃 nav_open，
+    否则期收益边界与标签对不上（DEBT-011）。净值展示类指标（年化/夏普/回撤/图）
+    仍走收盘口径 —— 两者分工明确，不是混口径。
+    """
+    if basis not in ("close", "open"):
+        raise ValueError(f"basis 只能是 'close' 或 'open'，实际 {basis!r}")
+    col = "nav" if basis == "close" else "nav_open"
+    return pd.DataFrame({i: r[col] for i, r in enumerate(results)})
 
 
 def main():
@@ -267,7 +280,7 @@ def main():
         dd = float((n / n.cummax() - 1).min())
         print(
             f"{L:<4}{n.iloc[-1]:>12.4f}{ann:>10.2%}{dd:>12.2%}{r['turnover'].sum():>12.2f}{r['fees'].sum():>12.5f}")
-    _ls = MT.ls_summary(nav_df, rdates)      # 演示也用它 —— 别再打印废弃的比值法
+    _ls = MT.ls_summary(nav_df, nav_frame_basis(res, "open"), rdates)   # T-6.3 开盘口径
     print()
     print(f"层差 {_ls['层差(pp)'] * 100:+.2f} pp ｜ 多空零成本 {_ls['多空年化']:+.2%} "
           f"｜ 多空净 {_ls['多空净年化']:+.2%}（扣 8% 融券）"

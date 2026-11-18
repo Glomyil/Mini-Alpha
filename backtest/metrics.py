@@ -132,7 +132,16 @@ _SNAP = {}   # panel snapshot memo: key -> (C, K)
 
 
 def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> pd.Series:
+    """逐期横截面 Spearman。**标签自 T+1 开盘起算**：factor(T) 对 open(T+1) -> open(T'+1)。
+
+    为什么不用 close->close（2026-11-17 T-6.3）：成交在 T+1 开盘，close(T)->open(T+1)
+    那段策略没有仓位，却会进标签 —— 而它恰恰是财报驱动的那段跳空。改用开盘对开盘后，
+    「财报在 T 日任意时刻发布都计入 factor(T)」这条口径才自洽。
+    """
     close, ok = panels["hfq_close"], panels["can_trade"]
+    if "hfq_open" not in panels:
+        raise KeyError("rank_ic 需要 panels['hfq_open']：IC 标签自 T+1 开盘起算（T-6.3）")
+    open_ = panels["hfq_open"]
     rdates = list(rdates)
     # --- 纯 numpy 的核心：先拍一次快照，之后全部用整数行号取数据（PITFALLS #24）---
     # 循环里不用 pandas 的 .loc / .corr —— 逐日抽行曾经是最后一个"偶发读到未写入页"
@@ -140,27 +149,33 @@ def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> 
     cols = close.columns
     pos = {d: i for i, d in enumerate(close.index)}
     # 把大面板快照缓存起来：每个因子看到的都是同一份，重复转 numpy 纯属浪费（PITFALLS #24）
-    key = (id(close), id(ok), close.shape)
+    key = (id(close), id(ok), id(open_), close.shape)
     if _SNAP.get("key") != key:
         _SNAP["key"] = key
         _SNAP["C"] = np.ascontiguousarray(
             close.to_numpy(dtype="float64", copy=True))
+        _SNAP["O"] = np.ascontiguousarray(
+            open_.to_numpy(dtype="float64", copy=True))
         _SNAP["K"] = np.ascontiguousarray(
             ok.reindex(columns=cols).fillna(False).to_numpy(dtype=bool, copy=True))
-    C, K = _SNAP["C"], _SNAP["K"]
+    C, O, K = _SNAP["C"], _SNAP["O"], _SNAP["K"]
     assert list(factor.columns) == list(
         cols), "factor columns must match panel columns"
     F = np.ascontiguousarray(factor.to_numpy(dtype="float64", copy=True))
     ri = np.array([pos.get(d, -1) for d in rdates], dtype=np.int64)
 
     out = {}
+    n_days = C.shape[0]
     for i in range(len(rdates) - 1):
         a, b = int(ri[i]), int(ri[i + 1])
         if a < 0 or b < 0:
             continue
-        fv, cv, nv, kv = F[a], C[a], C[b], K[a]
+        ea, eb = a + 1, b + 1              # 成交日 = 调仓日的下一个交易日
+        if eb >= n_days:
+            continue                        # 末尾没有下一交易日 => 无标签，跳过
+        fv, ov_a, ov_b, kv = F[a], O[ea], O[eb], K[ea]
         with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
-            rv = nv / cv - 1.0
+            rv = ov_b / ov_a - 1.0
         good = kv & np.isfinite(fv) & np.isfinite(rv)
         k = int(good.sum())
         if k < min_names:
@@ -235,8 +250,8 @@ def _period_returns(nav: pd.Series, index) -> np.ndarray:
     n_nan = int(np.isnan(r).sum())
     assert n_nan == 0, (
         f"逐期收益有 {n_nan} 个 NaN（共 {r.size}）—— "
-        f"rdates 里有 {len(index)} 个日期，其中有的不在 nav.index 上（reindex 产生了 NaN），"
-        f"或净值某期缺失")
+        f"传入了 {len(index)} 个日期，其中有的不在 nav.index 上（reindex 产生了 NaN）、"
+        f"或该成交日停牌缺开盘价、或净值某期缺失")
     return r
 
 
@@ -369,7 +384,15 @@ def t_stat(series) -> tuple[float, float]:
     return t, _norm_p(t)
 
 
-def ls_summary(nav_df: pd.DataFrame, rdates, *, borrow_cost: float = 0.08,
+def exec_dates(rdates, index) -> list:
+    """调仓日 -> 成交日（下一个交易日）。末尾没有下一交易日的那些调仓日被丢掉。"""
+    idx = pd.DatetimeIndex(index)
+    pos = idx.get_indexer(pd.DatetimeIndex(list(rdates)))
+    return [idx[p + 1] for p in pos if 0 <= p and p + 1 < len(idx)]
+
+
+def ls_summary(nav_df: pd.DataFrame, nav_open_df: pd.DataFrame, rdates, *,
+               borrow_cost: float = 0.08,
                periods_per_year: int = 12,
                trading_days: int = TRADING_DAYS) -> dict:
     """多空诊断：三个口径，各带年化 + 累计 + 假设说明。
@@ -393,10 +416,16 @@ def ls_summary(nav_df: pd.DataFrame, rdates, *, borrow_cost: float = 0.08,
     nl = nav_df[nav_df.columns[-1]]
     ns = nav_df[nav_df.columns[0]]
 
-    # ② 多空：按【调仓频率】取差值再复利
-    #    不能日频 —— 日频再平衡是另一个你做不到的策略（要每天调多空头寸）
-    rl = _period_returns(nl, rdates)
-    rs = _period_returns(ns, rdates)
+    # ② 多空：期收益自【成交日】起算（T-6.3）
+    #    成交在 T+1 开盘 ⇒ 期收益 = open(T+1) -> open(T'+1)。
+    #    用收盘净值算 close(T)->close(T') 会把「没有仓位的那段隔夜跳空」算进多空收益。
+    assert list(nav_open_df.columns) == list(nav_df.columns),         "nav_open_df 的列必须与 nav_df 一致"
+    assert nav_open_df.shape[1] >= 2,         f"nav_open_df 至少 2 列（层0 和层末），实际 {nav_open_df.shape[1]}"
+    _ex = exec_dates(rdates, nav_open_df.index)
+    nlo = nav_open_df[nav_open_df.columns[-1]]
+    nso = nav_open_df[nav_open_df.columns[0]]
+    rl = _period_returns(nlo, _ex)
+    rs = _period_returns(nso, _ex)
     diff = rl - rs
 
     # 复利：起点 1.0 + 每期累乘（纯 numpy，不用 pandas 的 cumprod 链，同 4.4.0）
@@ -546,7 +575,7 @@ def main():
     from backtest.assemble import build_features, rebalance_dates
     from backtest.factors import FACTORS
     from backtest.weights import weights_for_factor
-    from backtest.engine import run_all_layers, nav_frame
+    from backtest.engine import run_all_layers, nav_frame, nav_frame_basis
 
     t0 = time.time()
     panels = load_panels()
@@ -562,7 +591,7 @@ def main():
     print(layer_table(nav_df, res).round(4).to_string())
     print()
     print("多空（三种定义）：", {k: f"{v:.2%}" for k,
-          v in ls_summary(nav_df, rdates).items()})
+          v in ls_summary(nav_df, nav_frame_basis(res, "open"), rdates).items()})
 
     spec = FACTORS["rev_20d"]
     val = spec["fn"](build_features(panels, ["rev_20d"]), {}) * spec["sign"]
