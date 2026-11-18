@@ -214,6 +214,12 @@ class Fetcher:
             if str(rs.error_code).startswith("10001"):   # 未登录 / 会话失效
                 self.relogin()
                 continue
+            if str(rs.error_code).startswith("10002"):   # 网络层：socket 已经断了
+                # 10002004 远程主机强迫关闭连接 / 10002007 接收数据异常 / 2008 接收超时
+                # 此时的连接不可再用 ⇒ 必须先重连再重试；只 sleep 不重连 = 在死 socket 上撞三次
+                self.relogin()
+                time.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                continue
             if str(rs.error_code).startswith("10004"):   # 参数类错误，重试无益
                 raise RuntimeError(last)
             time.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
@@ -336,8 +342,12 @@ def main() -> None:
                     cs["err"] = ""
                 cs = todo[0][1]
             except Exception as e:
-                cs["att"] = int(cs.get("att", 0)) + 1
-                cs["err"] = "%s: %s" % (type(e).__name__, e)
+                # 网络层故障不算这只票的错：att 跨运行累积，三次抖动就把它永久跳过（
+                # main 里 att >= MAX_RETRIES 就直接 continue）—— 27 天的活会静默留数据洞。
+                _msg = "%s: %s" % (type(e).__name__, e)
+                if not (("10002" in _msg) or ("socket" in _msg.lower())):
+                    cs["att"] = int(cs.get("att", 0)) + 1
+                cs["err"] = _msg
                 cs["st"] = "failed"
                 f.logf.write(json.dumps({"t": datetime.now().isoformat(timespec="seconds"),
                                          "code": code, "err": cs["err"]}, ensure_ascii=False) + "\n")
