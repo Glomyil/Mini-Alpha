@@ -3,6 +3,8 @@ import yaml as yml
 REQUIRED_COLUMNS = ["date", "open", "high",
                     "low", "close", "volume"]  # 通过定义变量来保证正常运行
 
+# 新增财务事件表（data/storage/fundamental_event/{code}.parquet）的必需列。
+FUNDAMENTAL_REQUIRED_COLUMNS = ["statDate", "pubDate_max"]
 
 def check_not_empty(df, context=""):  # 定义了一个检查dataframe是否是空的函数，context用于存储文件名称
     if df is None or len(df) == 0:  # 如果里面啥都没有或是自身行数为0
@@ -12,9 +14,9 @@ def check_not_empty(df, context=""):  # 定义了一个检查dataframe是否是�
         raise ValueError(msg)  # 这个时候会报错并输出提醒对应文件
 
 
-# 此函数用于检查dataframe的数据是否都有在REQUIRED_COLUMNS中定义的列
+# 此函数用于检查dataframe的数据是否都有在契约里定义的列
 def check_required_columns(df, required=None):
-    # 假如required是空的，那么就会自动采用REQUIRED_COLUMNS中定义的检查清单
+    # 假如required是空的，自动用 REQUIRED_COLUMNS（行情那套）
     cols = required if required is not None else REQUIRED_COLUMNS
     # missing列表自动基于内部的条件添加未出现的列
     missing = [c for c in cols if c not in df.columns]
@@ -23,21 +25,21 @@ def check_required_columns(df, required=None):
 
 
 COLUMN_WHITELIST = {  # 在进行数据清洗时有时候会计算出新的指标要添加到原有的OHLCV数据中，为了保证数据的一致性。
-    "is_suspended":     "停牌环节加：停牌=1",  # 这里先定义了一部分可以添加的指标，后续还要添加的话进行修改即可
-    "hfq_close":     "复权环节加:后复权收盘价",
-    "low_liquidity":  "流动性环节加：流动性差=1",
-    "suspension_days": "连续停牌日期",
-    "is_resume": "复牌日",
-    "resume_after_days": "复牌日统计停牌日期长度",
-    "is_price_bad": "价格加价格异常判定：价格不可用=1",
-    "is_amt_vol_bad": "价格环节加量额判定异常：量额异常=1",
-    "ret_1d_hfq": "今天相较前天复权后价格变动的百分比",
-    "hfq_open":     "复权环节加：后复权开盘价（仅供比率用途 / T+1 开盘成交用）",
-    "flag_open_limit_up":   "涨跌停环节加：开盘即涨停=1（买不到）",
-    "flag_open_limit_down": "涨跌停环节加：开盘即跌停=1（卖不掉）",
-    "flag_new_listing":     "涨跌停环节加：处于新股无涨跌幅期=1",
-    "turn":     "抓取层新增：换手率（百分数，如 0.1234 表示 0.1234%）",
-    "float_mv": "派生环节加：流通市值 = close(未复权) × volume/(turn/100)",
+    "is_suspended":            "停牌环节加：停牌=1",  # 这里先定义了一部分可以添加的指标，后续还要添加的话进行修改即可
+    "hfq_close":               "复权环节加:后复权收盘价",
+    "low_liquidity":           "流动性环节加：流动性差=1",
+    "suspension_days":         "连续停牌日期",
+    "is_resume":               "复牌日",
+    "resume_after_days":       "复牌日统计停牌日期长度",
+    "is_price_bad":            "价格加价格异常判定：价格不可用=1",
+    "is_amt_vol_bad":          "价格环节加量额判定异常：量额异常=1",
+    "ret_1d_hfq":              "今天相较前天复权后价格变动的百分比",
+    "hfq_open":                "复权环节加：后复权开盘价（仅供比率用途 / T+1 开盘成交用）",
+    "flag_open_limit_up":      "涨跌停环节加：开盘即涨停=1（买不到）",
+    "flag_open_limit_down":    "涨跌停环节加：开盘即跌停=1（卖不掉）",
+    "flag_new_listing":        "涨跌停环节加：处于新股无涨跌幅期=1",
+    "turn":                    "抓取层新增：换手率（百分数，如 0.1234 表示 0.1234%）",
+    "float_mv":                "派生环节加：流通市值 = close(未复权) × volume/(turn/100)",
 }
 
 
@@ -91,7 +93,9 @@ def finish_step_report(report, metrics):  # 此函数用于输出函数运行后
     report["metrics"] = metrics
     return report
 
+
 # ── 清洗环节清单（唯一权威是 pipeline.PIPELINE；这份常量给"不能依赖 pipeline 的模块"用）──
 # backtest/panel.py 只需要环节名来做缓存身份校验 —— 它不该为了一串名字去 import 整个管线
 # （那会让 data ↔ backtest 互相依赖）。两边一致性由 pipeline.py 的断言守着。
-PIPELINE_NAMES = ("align", "suspension", "price", "limits", "adjust", "derived")
+PIPELINE_NAMES = ("align", "suspension", "price",
+                  "limits", "adjust", "derived")

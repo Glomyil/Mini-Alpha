@@ -56,6 +56,11 @@ CLEANER_DAILY_DIR: Path = DATA_STORAGE / "cleaner_daily"
 
 FUNDAMENTAL_DIR: Path = DATA_STORAGE / "fundamental"
 
+# 财务事件宽表目录（fundamental_merge 产出，loader 读取）
+# 唯一来源：data/fundamental_merge.py 与 data/loader.py 都从这里 import，
+# 避免「同一个目录定义两遍」（PITFALLS #26）。
+FUNDAMENTAL_EVENT_DIR: Path = DATA_STORAGE / "fundamental_event"
+
 # 下载进度账本（断点续传 + 每日预算记账）
 FUNDAMENTAL_STATE_FILE: Path = DATA_STORAGE / "fundamental_state.json"
 

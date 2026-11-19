@@ -96,3 +96,47 @@ def test_main_passes_pool_into_weights_and_report():
     assert "select=pool.selectable()" in src, "weights 没收到 select=pool.selectable()"
     assert "pool.can_trade" in src, "weights 没收到 pool.can_trade（engine 侧的可交易性）"
     assert "bench_mask=pool.benchmark_mask()" in src, "build_report 没收到 bench_mask"
+
+
+# ── 数据源契约（2026-11-18）：契约登记只能有一处，且两端必须对得上 ──────────
+
+def test_kinds_is_the_single_registry():
+    """loader.KINDS 是数据源的唯一登记表：两张源都要有 目录/时间列/必需列。"""
+    from data import loader
+    from data.cleaner import base
+
+    assert set(loader.KINDS) == {"stock", "fundamental"}
+    for kind, cfg in loader.KINDS.items():
+        assert set(cfg) == {"store", "time_col", "required"}, kind
+        assert cfg["time_col"] in ("date", "statDate"), kind
+    # 用 is 而不是 ==：必需的是一份常量，不是两份相等的清单
+    assert loader.KINDS["stock"]["required"] is base.REQUIRED_COLUMNS
+    assert loader.KINDS["fundamental"]["required"] is base.FUNDAMENTAL_REQUIRED_COLUMNS
+
+
+def test_fundamental_event_dir_has_one_source():
+    """财务事件目录只在 config/constants.py 定义一次；merge 与 loader 都从那里取。"""
+    from config import constants as C
+    from data import fundamental_merge as FM
+    from data import loader
+
+    assert loader.KINDS["fundamental"]["store"] == C.FUNDAMENTAL_EVENT_DIR
+    assert FM.EVENT_DIR == C.FUNDAMENTAL_EVENT_DIR, (
+        f"merge 的 EVENT_DIR={FM.EVENT_DIR} 与 constants 不一致 —— "
+        f"同一个目录定义了两遍（PITFALLS #26）")
+
+
+def test_fundamental_contract_is_subset_of_merge_output():
+    """财务必需列必须 ⊆ fundamental_merge 的真实产出列（两端对齐）。"""
+    from data.cleaner import base
+    from data.fundamental_merge import TABLES
+
+    produced = {"statDate", "pubDate_max"}
+    for t, cols in TABLES.items():
+        produced |= {f"pubDate_{t}"} | set(cols)
+    missing = [c for c in base.FUNDAMENTAL_REQUIRED_COLUMNS if c not in produced]
+    assert not missing, f"财务契约里的 {missing} 不在 merge 产出列里"
+    # 列数不写死：由「1 + 每表(1 个 pubDate + N 指标) + 1 个 pubDate_max」算出来，
+    # 否则这里就成了 merge 规格的第二个真相源。
+    expect = 1 + sum(1 + len(c) for c in TABLES.values()) + 1
+    assert len(produced) == expect, f"merge 规格应是 {expect} 列，实际 {len(produced)}"
