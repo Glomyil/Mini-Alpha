@@ -3,7 +3,7 @@ import numpy as np
 from data.cleaner import base
 
 
-def run(df: pd.DataFrame, params: dict, ctx: dict) -> pd.DataFrame:
+def run(df: pd.DataFrame, params: dict, ctx: dict, kind: str = "stock") -> pd.DataFrame:
     base.check_not_empty(df, context="derived")
     base.check_required_columns(df)
     base.check_required_columns(df, ["hfq_close"])

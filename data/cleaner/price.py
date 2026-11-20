@@ -6,7 +6,7 @@ from data.cleaner import base
 _PRICE_COLS = ["open", "high", "low", "close"]
 
 
-def run(df: pd.DataFrame, params: dict, ctx: dict) -> pd.DataFrame:
+def run(df: pd.DataFrame, params: dict, ctx: dict, kind: str = "stock") -> pd.DataFrame:
     base.check_not_empty(df, context="price")
     base.check_required_columns(df)
     base.check_required_columns(df, ["amount"])

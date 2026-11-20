@@ -4,7 +4,7 @@ from data.cleaner import base
 _PRICE_COLS = ["open", "high", "low", "close"]
 
 
-def run(df: pd.DataFrame, params: dict, ctx: dict) -> pd.DataFrame:  # 统一数据接口契约，怎么进来怎么出去
+def run(df: pd.DataFrame, params: dict, ctx: dict, kind: str = "stock") -> pd.DataFrame:  # 统一数据接口契约，怎么进来怎么出去
     base.check_not_empty(df, context="suspension")
     base.check_required_columns(df)
     base.check_required_columns(df, ["tradestatus"])  # 检查是否有缺列，是否有环节所需的列

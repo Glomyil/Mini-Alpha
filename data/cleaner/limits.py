@@ -86,7 +86,7 @@ def compute_limits(prev_close, open_px, pct, days_since_listing,
     }
 
 
-def run(df: pd.DataFrame, params: dict, ctx: dict) -> pd.DataFrame:
+def run(df: pd.DataFrame, params: dict, ctx: dict, kind: str = "stock") -> pd.DataFrame:
     base.check_not_empty(df, context="limits")
     base.check_required_columns(df)
     base.check_required_columns(

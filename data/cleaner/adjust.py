@@ -2,7 +2,7 @@ import pandas as pd
 from data.cleaner import base
 
 
-def run(df: pd.DataFrame, params: dict, ctx: dict) -> pd.DataFrame:  # 所有模块统一契约接口名称用于data的处理
+def run(df: pd.DataFrame, params: dict, ctx: dict, kind: str = "stock") -> pd.DataFrame:  # 所有模块统一契约接口名称用于data的处理
     base.check_not_empty(df, context="adjust")  # 检查数据复权因子是否存在
     base.check_required_columns(df)
     base.check_required_columns(

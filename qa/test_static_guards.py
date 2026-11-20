@@ -113,6 +113,14 @@ def test_kinds_is_the_single_registry():
     assert loader.KINDS["stock"]["required"] is base.REQUIRED_COLUMNS
     assert loader.KINDS["fundamental"]["required"] is base.FUNDAMENTAL_REQUIRED_COLUMNS
 
+    # 两张表都以 kind 为键（loader 管「住哪」、base 管「长什么样」）。
+    # 内容是同一批对象，但【键集合】必须对齐 —— 否则给一类数据源只登记了一半：
+    #   只加在 loader  → base 查不到该 kind，align 那边会 ValueError
+    #   只加在 base    → loader 查不到 store，当场 KeyError
+    assert set(loader.KINDS) == set(base._REQUIRED_BY_KIND), (
+        f"两张 kind 登记表的键不一致："
+        f"loader={sorted(loader.KINDS)} vs base={sorted(base._REQUIRED_BY_KIND)}")
+
 
 def test_fundamental_event_dir_has_one_source():
     """财务事件目录只在 config/constants.py 定义一次；merge 与 loader 都从那里取。"""

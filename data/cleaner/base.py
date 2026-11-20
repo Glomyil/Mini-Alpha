@@ -3,8 +3,17 @@ import yaml as yml
 REQUIRED_COLUMNS = ["date", "open", "high",
                     "low", "close", "volume"]  # 通过定义变量来保证正常运行
 
-# 新增财务事件表（data/storage/fundamental_event/{code}.parquet）的必需列。
+# 财务事件表（data/storage/fundamental_event/{code}.parquet）的必需列。
+# ⚠️ 只有这两个是结构性的：其余 37 列全缺也合法（某只票可能只下了 profit 一张表）。
 FUNDAMENTAL_REQUIRED_COLUMNS = ["statDate", "pubDate_max"]
+
+# 数据源 -> 必需列契约。加新数据源只往这里加一行。
+# 与 COLUMN_WHITELIST 的区别：后者管「清洗环节新加的列必须登记」，
+# 这里管「读进来的原始表至少得有哪些列」。
+_REQUIRED_BY_KIND = {
+    "stock": REQUIRED_COLUMNS,
+    "fundamental": FUNDAMENTAL_REQUIRED_COLUMNS,
+}
 
 def check_not_empty(df, context=""):  # 定义了一个检查dataframe是否是空的函数，context用于存储文件名称
     if df is None or len(df) == 0:  # 如果里面啥都没有或是自身行数为0
@@ -15,9 +24,22 @@ def check_not_empty(df, context=""):  # 定义了一个检查dataframe是否是�
 
 
 # 此函数用于检查dataframe的数据是否都有在契约里定义的列
-def check_required_columns(df, required=None):
-    # 假如required是空的，自动用 REQUIRED_COLUMNS（行情那套）
-    cols = required if required is not None else REQUIRED_COLUMNS
+def check_required_columns(df, required=None, *, kind: str = "stock"):
+    """检查必需列。
+
+    required : 临时清单，传了就优先（现有 6 处位置调用靠它，语义不变）
+    kind     : 走 _REQUIRED_BY_KIND 登记的那套契约，默认 "stock"
+               关键字专用，避免和第二个位置参数打架
+
+    只管「列存不存在」。值能不能用是另一回事（比如 pubDate_max 全 NULL）。
+    """
+    if required is not None:
+        cols = required
+    else:
+        if kind not in _REQUIRED_BY_KIND:
+            raise ValueError(
+                f"未知的数据类型 kind={kind!r}，可选 {sorted(_REQUIRED_BY_KIND)}")
+        cols = _REQUIRED_BY_KIND[kind]
     # missing列表自动基于内部的条件添加未出现的列
     missing = [c for c in cols if c not in df.columns]
     if missing:

@@ -29,7 +29,7 @@ assert base.PIPELINE_NAMES == tuple(n for n, _ in PIPELINE), (
 _START, _END = "2020-01-01", "2020-12-31"
 
 
-def run_one(df, ctx, steps=None):
+def run_one(df, ctx, steps=None, kind: str = "stock"):
     """让一只股票的 df 依次走过清单里的每个环节 → (df, 每步报告)"""
     # ctx 契约：环节会读这两个键，缺了当场报错（别等到环节里 KeyError）
     for key in ("asset_type", "code"):  # 用于标记对应数据的类型并检测对应的列
@@ -42,7 +42,7 @@ def run_one(df, ctx, steps=None):
         before_cols = list(df.columns)          # 记账：进环节前的列（快照）
         rows_before = len(df)                   # 记账：进环节前的行数
 
-        out = mod.run(df, {}, ctx)              # 叫号：把 df 递给环节
+        out = mod.run(df, {}, ctx, kind=kind)   # 叫号：把 df 递给环节（kind 全链统一契约）
         if out is None:
             # run函数未返回处理结果自动报错
             raise TypeError(f"环节 '{name}' 返回了 None —— 忘了 return df？")
