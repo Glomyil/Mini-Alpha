@@ -41,7 +41,7 @@ def check(cond, label):
 
 
 # 玩具环节：加一列 toy（故意不在白名单里，用来验证提醒）
-def toy_run(df, params, ctx):
+def toy_run(df, params, ctx, kind="stock"):   # kind 是 run() 契约的一部分（2026-11-18 统一）
     out = df.copy()
     out["toy"] = 1
     return out
