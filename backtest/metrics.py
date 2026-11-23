@@ -128,9 +128,6 @@ def rank1d(x, ties="first"):
     return r
 
 
-_SNAP = {}   # panel snapshot memo: key -> (C, K)
-
-
 def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> pd.Series:
     """逐期横截面 Spearman。**标签自 T+1 开盘起算**：factor(T) 对 open(T+1) -> open(T'+1)。
 
@@ -148,17 +145,18 @@ def rank_ic(factor: pd.DataFrame, panels: dict, rdates, min_names: int = 30) -> 
     # 导致横截面被污染的地方（症状是某一天的 Spearman 突然算不出来）
     cols = close.columns
     pos = {d: i for i, d in enumerate(close.index)}
-    # 把大面板快照缓存起来：每个因子看到的都是同一份，重复转 numpy 纯属浪费（PITFALLS #24）
-    key = (id(close), id(ok), id(open_), close.shape)
-    if _SNAP.get("key") != key:
-        _SNAP["key"] = key
-        _SNAP["C"] = np.ascontiguousarray(
-            close.to_numpy(dtype="float64", copy=True))
-        _SNAP["O"] = np.ascontiguousarray(
-            open_.to_numpy(dtype="float64", copy=True))
-        _SNAP["K"] = np.ascontiguousarray(
-            ok.reindex(columns=cols).fillna(False).to_numpy(dtype=bool, copy=True))
-    C, O, K = _SNAP["C"], _SNAP["O"], _SNAP["K"]
+    # ── 2026-11-23 去掉模块级快照缓存 ─────────────────────────────
+    # 原来 _SNAP 把一个 panel 快照压在全局字典里反复用，两处独立的问题：
+    #   ① 身份用 id()：对象一旦被 GC，地址会被新对象复用 ⇒ 缓存静默命中错误的表
+    #      （和 PITFALLS #14「用规模当身份」同一类错）。
+    #   ② 三个常驻数组各 125 MB（2871×5477 float64）＝ 376 MB 不释放；
+    #      OOS 里 6 因子 × 2 段连跑时的分配节奏与单因子完全不同 ——
+    #      实测这是唯一只在「完整 OOS 流程」下复现的间歇性结果漂移的可疑共享状态。
+    # 现在每次自己转（每因子多约 0.5 s），换取「无跨调用状态」。
+    C = np.ascontiguousarray(close.to_numpy(dtype="float64", copy=True))
+    O = np.ascontiguousarray(open_.to_numpy(dtype="float64", copy=True))
+    K = np.ascontiguousarray(
+        ok.reindex(columns=cols).fillna(False).to_numpy(dtype=bool, copy=True))
     assert list(factor.columns) == list(
         cols), "factor columns must match panel columns"
     F = np.ascontiguousarray(factor.to_numpy(dtype="float64", copy=True))

@@ -81,7 +81,18 @@ def build_factor_nav(name, panels, spec, rdates, pool):
     返回 dict: fval / W / res / nav / nav_full
     """
     _sp = FACTORS[name]
-    _fval = _sp["fn"](build_features(panels, [name]), {}) * _sp["sign"]
+    _feats = build_features(panels, [name])
+    _vals = _sp["fn"](_feats, {})
+    # ── 2026-11-23：禁用 pandas 宽表二元算术（PITFALLS #30）──
+    # 探针实测：分叉就在这一行。特征表指纹稳定（_warm 记的），但 `* sign` 之后
+    # 的 _fval 在 20 次运行里出现 2~3 种取值 —— 2871×5477 = 1570 万格的
+    # pandas 宽表乘法偶发返回垃圾数组（#30 记录的正是这件事）。
+    # 处置：先 to_numpy 显式搬成 C 连续的 float64，再 numpy 乘，最后装回 DataFrame。
+    # 「sign 只是乘 -1」不等于「可以随便乘」—— 问题在 pandas 的宽表实现，不在算术复杂度。
+    _arr = np.ascontiguousarray(_vals.to_numpy(dtype="float64"))
+    if _sp["sign"] != 1:
+        _arr = _arr * float(_sp["sign"])
+    _fval = pd.DataFrame(_arr, index=_vals.index, columns=_vals.columns)
 
     # ── 点位1：panel → 权重（estimation_pool）──
     #   放在因子值出来之后、中性化之前：同时决定

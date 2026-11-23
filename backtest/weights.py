@@ -1,10 +1,38 @@
 from __future__ import annotations
+import os
 import pandas as pd
 import numpy as np
 from backtest.assemble import build_features, rebalance_dates
 from backtest.factors import FACTORS
 from backtest.metrics import rank1d
 from loguru import logger
+
+
+def _assign_layers(F, C, n_layers):
+    """核心循环：名次 -> 层 + 层内等权。抽出来是为了能【算两遍自证】。
+
+    所有输出数组都用 np.full / np.zeros 预填，结构上不存在"未写区"；
+    r 用 np.empty 但 r[order] 里 order 是排列、写满每一个格子。
+    """
+    nT, nN = F.shape
+    LAY = np.full((nT, nN), -1, dtype="int8")
+    Wn = [np.zeros((nT, nN), dtype="float32") for _ in range(n_layers)]
+    for i in range(nT):
+        v = F[i]
+        idx = np.flatnonzero(C[i] & np.isfinite(v))
+        n = idx.size
+        if n == 0:
+            continue
+        order = np.argsort(v[idx], kind="stable")
+        r = np.empty(n, dtype="float64")
+        r[order] = np.arange(1, n + 1, dtype="float64")
+        layer = ((r - 1) * n_layers // n).astype("int8")
+        LAY[i, idx] = layer
+        for L in range(n_layers):
+            sel = idx[layer == L]
+            if sel.size:
+                Wn[L][i, sel] = np.float32(1.0 / sel.size)
+    return LAY, Wn
 
 
 def build_target_weights(factor, rdates, can_trade, n_layers=5, *, select=None):
@@ -38,24 +66,23 @@ def build_target_weights(factor, rdates, can_trade, n_layers=5, *, select=None):
     C = np.ascontiguousarray(
         _pool.reindex(index=rdates, columns=cols).fillna(False).to_numpy(dtype=bool, copy=True))
 
-    nT, nN = F.shape
-    LAY = np.full((nT, nN), -1, dtype="int8")
-    Wn = [np.zeros((nT, nN), dtype="float32") for _ in range(n_layers)]
-    for i in range(nT):
-        v = F[i]
-        idx = np.flatnonzero(C[i] & np.isfinite(v))
-        n = idx.size
-        if n == 0:
-            continue
-        order = np.argsort(v[idx], kind="stable")
-        r = np.empty(n, dtype="float64")
-        r[order] = np.arange(1, n + 1, dtype="float64")
-        layer = ((r - 1) * n_layers // n).astype("int8")
-        LAY[i, idx] = layer
-        for L in range(n_layers):
-            sel = idx[layer == L]
-            if sel.size:
-                Wn[L][i, sel] = np.float32(1.0 / sel.size)
+    LAY, Wn = _assign_layers(F, C, n_layers)
+
+    # 自证（2026-11-18）：同样的输入再算一遍，结果必须逐字节相同。
+    # 这是对 PITFALLS #23/#30「偶发读到未写入页」的结构化解法 ——
+    # 不需要知道 bug 在哪一层，只要它不稳定，这里当场炸。
+    # 关掉：set QD_SELFCHECK=0（跑重活时省一次循环，约 +0.3s）
+    if os.environ.get("QD_SELFCHECK", "1") != "0":
+        LAY2, Wn2 = _assign_layers(F, C, n_layers)
+        if not np.array_equal(LAY, LAY2):
+            _d = int((LAY != LAY2).sum())
+            raise AssertionError(
+                f"层表两次计算不一致：{_d} 格不同（共 {LAY.size}）"
+                f" —— 读到未写入内存，PITFALLS #23")
+        for _L, (_a, _b) in enumerate(zip(Wn, Wn2)):
+            if not np.array_equal(_a, _b):
+                raise AssertionError(
+                    f"第 {_L} 层权重两次计算不一致 —— 同上（PITFALLS #23）")
 
     ix = pd.Index(rdates)
     layers = pd.DataFrame(LAY, index=ix, columns=cols)

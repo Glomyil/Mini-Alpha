@@ -118,7 +118,14 @@ def ma_dev(panels, n):
 
 def amihud(panels, n):
     px = panels["ret_1d_hfq"]
-    x = (px.abs() / panels["amount"]).to_numpy()
+    # ⚠️ 不用 pandas 宽表除法（PITFALLS #30）：1570 万格的二元算术偶发返回垃圾数组。
+    #    这是同一个坏出口的第三处 —— 前两处是 main.py 的 `* sign` 和探针的浮点转换。
+    #    保持 float32 原位除，和 pandas 版逐位一致（不用 upcast，避免改变数值）。
+    _r = np.ascontiguousarray(px.to_numpy())
+    _amt = np.ascontiguousarray(panels["amount"].to_numpy())
+    with np.errstate(invalid="ignore", divide="ignore"):
+        x = np.abs(_r) / _amt
+    del _r, _amt
     out = _roll(x, n, "mean")
     f = pd.DataFrame(out.astype("float32"), index=px.index, columns=px.columns)
     _warm(amihud, f, n)
