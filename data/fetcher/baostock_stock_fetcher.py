@@ -84,9 +84,14 @@ KLINE_FIELDS: str = (
     # 2026-11-04 加 turn（换手率）：流通股本 = volume / (turn/100)，
     # 流通市值 = close(未复权) × 流通股本。实测 sh.600000 反推 293.44 亿股
     # vs 实际 293.52 亿股（误差 0.03%），且年内 CV ≈ 0.0001。
-    # ⚠️ 加字段必须【全量重下】—— --update 增量只会把 turn 填在最后几天，
-    #    历史行 concat 后全是 NaN（已实测推演，见 T-6.1 工单）。
-    "date,code,open,high,low,close,volume,amount,turn,tradestatus,isST"
+    # 2026-11-23 加 4 个估值列：peTTM/pbMRQ/psTTM/pcfNcfTTM。
+    # baostock 的日 K 线接口直接返回它们（已算好的时点值），我们不用自己算。
+    # ⚠️ 口径：这四列都是【未复权价 ÷ 财务】，绝不能和 hfq_close 混用 ——
+    #    复权价是"按今天口径回推的历史价"，和当时的净资产/股本不匹配。
+    # ⚠️ 补历史：走 backfill_one（按原文件自己的日期范围重查缺列），
+    #    不要指望 --update（它只填最后几天，历史行会留 NaN）。
+    "date,code,open,high,low,close,volume,amount,turn,tradestatus,isST,"
+    "peTTM,pbMRQ,psTTM,pcfNcfTTM"
 )
 
 # 交易状态/ST 为空字符串时的兜底值(非价格类字段, 允许补 0)
@@ -243,7 +248,11 @@ def process_one(bs: Any, code: str, start: str, end: str, target: Path) -> Dict[
 _REQUIRED_FIELDS: tuple = tuple(KLINE_FIELDS.split(",")) + ("back_adj_factor",)
 
 
-_NUMERIC_FIELDS = ("open", "high", "low", "close", "volume", "amount", "turn")
+# ⚠️ 2026-11-04 的教训：只把新字段加进 KLINE_FIELDS、忘了加这里，
+#    会让它以 object 落盘（PITFALLS 里那条"抓取层字符串一路往下流"）。
+#    加字段时【两个地方都要加】，缺一个 missing_fields() 也查不出来。
+_NUMERIC_FIELDS = ("open", "high", "low", "close", "volume", "amount", "turn",
+                   "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM")
 
 
 def missing_fields(target: Path) -> List[str]:

@@ -48,7 +48,10 @@ def run(df: pd.DataFrame, params: dict, ctx: dict,
     # ⑤ 数值列类型修正：只转类型，绝不 fillna（缺值留给下游环节处理）
     # turn（换手率）必须在这里转成数值：抓取层落盘时它是 object（字符串），
     # 不转的话会以 object 一路往下流，某处 to_numeric 后静默变 NaN → 市值全 NaN。
-    for col in ["open", "high", "low", "close", "volume", "amount", "turn"]:
+    # 估值四列同样是"抓取层落盘为字符串"的字段，必须在这里转数值 ——
+    # 否则会以 object 一路往下流，某处 to_numeric 后静默变 NaN（turn 踩过的同一个坑）。
+    for col in ["open", "high", "low", "close", "volume", "amount", "turn",
+                "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
 

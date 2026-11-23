@@ -62,6 +62,18 @@ COLUMN_WHITELIST = {  # 在进行数据清洗时有时候会计算出新的指�
     "flag_new_listing":        "涨跌停环节加：处于新股无涨跌幅期=1",
     "turn":                    "抓取层新增：换手率（百分数，如 0.1234 表示 0.1234%）",
     "float_mv":                "派生环节加：流通市值 = close(未复权) × volume/(turn/100)",
+
+    # ── 抓取层新增的估值四列（2026-11-23）──
+    # 都是 baostock 日 K 线直接返回的【时点值】，我们不做任何计算。
+    # ⚠️ 口径：基于【未复权价格】，绝不能和 hfq_close 混用 ——
+    #    复权价是"按今天口径回推的历史价"，和当时的股本/净资产不匹配。
+    # ⚠️ 登记在这里是为了 ops/health_check.py 的"合法列全集"
+    #    （health_check.py:54 REGISTERED_COLS = REQUIRED_COLUMNS | COLUMN_WHITELIST），
+    #    不是为了 pipeline.check_new_columns —— 那个只看"环节新增的列"。
+    "peTTM":                   "抓取层新增：滚动市盈率（时点值，未复权价口径）",
+    "pbMRQ":                   "抓取层新增：市净率 MRQ（时点值，未复权价口径）",
+    "psTTM":                   "抓取层新增：滚动市销率（时点值，未复权价口径）",
+    "pcfNcfTTM":               "抓取层新增：滚动市现率（时点值，未复权价口径）",
 }
 
 
