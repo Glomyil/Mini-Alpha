@@ -148,3 +148,23 @@ def test_fundamental_contract_is_subset_of_merge_output():
     # 否则这里就成了 merge 规格的第二个真相源。
     expect = 1 + sum(1 + len(c) for c in TABLES.values()) + 1
     assert len(produced) == expect, f"merge 规格应是 {expect} 列，实际 {len(produced)}"
+
+# ── 财务字段口径表（2026-11-23）──────────────────────────────
+
+def test_every_fundamental_column_has_a_caliber_entry():
+    """CALIBER 必须覆盖 TABLES 里全部 32 个指标列 —— 漏一个就红。
+
+    为什么要有这条：32 列里混着【累计 / TTM / 同比 / 天数 / 时点存量】五种口径。
+    不标出来，就会有人把 TTM 的和累计的放进同一个比值里 ——
+    算出来的数没有金融含义，而且【不报错】。
+    这和 PIPELINE_NAMES / _REQUIRED_BY_KIND 的对齐断言是同一个模式：
+    第二份清单必须自带校验，否则迟早脱节（PITFALLS #26）。
+    """
+    from data.fundamental_merge import CALIBER, TABLES
+
+    produced = {c for cols in TABLES.values() for c in cols}
+    missing = sorted(produced - set(CALIBER))
+    extra = sorted(set(CALIBER) - produced)
+    assert not missing, f"这些列没有口径说明: {missing}"
+    assert not extra, f"CALIBER 里有 TABLES 不存在的列: {extra}"
+    assert len(produced) == 32, f"merge 规格应是 32 个指标，实际 {len(produced)}"

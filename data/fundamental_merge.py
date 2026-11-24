@@ -43,6 +43,58 @@ TABLES: dict[str, list[str]] = {
                  "ebitToInterest", "CFOToOR", "CFOToNP", "CFOToGr"],
 }
 
+# ─────────────────────────────────────────────────────────────
+# 每个指标的口径。与 TABLES 一一对应（qa/test_static_guards.py 有条断言锁着）。
+#
+# 为什么必须有这张表：32 列里混着【累计 / TTM / 同比 / 天数 / 时点存量】五种口径。
+# 不标出来，就会有人把 TTM 的和累计的放进同一个比值里 —— 算出来的数没有
+# 金融含义，而且【不报错】。
+#
+# 三处最容易混的：
+#   roeAvg  分子是【归母】净利
+#   npMargin 分子是【净利润】（含少数股东损益）—— 和 roeAvg 不是同一个净利
+#   MBRevenue 是【主营】收入，≠ 营业收入（npMargin 的分母用的才是营业收入）
+# ─────────────────────────────────────────────────────────────
+CALIBER: dict[str, str] = {
+    # ── profit ──
+    "roeAvg":     "累计 · 归母净利 / 平均归母权益 · 小数",
+    "npMargin":   "累计 · 净利润 / 营业收入 · 小数（分子≠roeAvg 的归母净利）",
+    "gpMargin":   "累计 · 毛利 / 营业收入 · 小数",
+    "netProfit":  "累计 · 元",
+    "epsTTM":     "TTM · 归母净利TTM / 最新总股本 · 元/股",
+    "MBRevenue":  "累计 · 主营收入（≠营业收入）· 仅年报/半年报披露",
+    "totalShare": "时点存量 · 股（禁用于市值，市值用日频 float_mv）",
+    "liqaShare":  "时点存量 · 股（禁用于市值，市值用日频 float_mv）",
+    # ── growth（已实测确认是累计同比，不是单季同比）──
+    "YOYEquity":  "同比 · (本期净资产 − 上年同期) / |上年同期| · 小数",
+    "YOYAsset":   "同比 · 同上，总资产",
+    "YOYNI":      "同比 · 同上，净利润（累计口径，实测 81.6% 逐位吻合）",
+    "YOYEPSBasic":"同比 · 同上，基本每股收益",
+    "YOYPNI":     "同比 · 同上，归属母公司股东净利润",
+    # ── balance ──
+    "currentRatio":   "时点 · 流动资产 / 流动负债 · 小数",
+    "quickRatio":     "时点 · (流动资产−存货净额) / 流动负债 · 小数",
+    "cashRatio":      "时点 · (货币资金+交易性金融资产) / 流动负债 · 小数",
+    "YOYLiability":   "同比 · 同上，总负债",
+    "liabilityToAsset":"时点 · 负债总额 / 资产总额 · 小数（上游 2024-06~2025-09 有 /100 故障，已被 fund_quality 修回）",
+    "assetToEquity":  "时点 · 资产总额 / 股东权益 = 1/(1−资产负债率)",
+    # ── operation（分子是年初至今的营收/成本 ⇒ 累计口径）──
+    "NRTurnRatio":   "累计 · 营业收入 / 平均应收 · 次",
+    "NRTurnDays":    "累计派生 · 季报天数 / 周转率；天数分母 = 90/180/270/360",
+    "INVTurnRatio":  "累计 · 营业成本 / 平均存货 · 次",
+    "INVTurnDays":   "累计派生 · 同上",
+    "CATurnRatio":   "累计 · 营业总收入 / 平均流动资产 · 次",
+    "AssetTurnRatio":"累计 · 营业总收入 / 平均总资产 · 次",
+    # ── cashflow ──
+    "CAToAsset":           "时点 · 流动资产 / 总资产 · 小数",
+    "NCAToAsset":          "时点 · 非流动资产 / 总资产 · 小数（与上行相加应 = 1）",
+    "tangibleAssetToAsset":"时点 · 有形资产 / 总资产 · 小数",
+    "ebitToInterest":      "累计 · 息税前利润 / 利息费用 · 倍",
+    "CFOToOR":             "累计 · 经营现金流净额 / 营业收入 · 小数",
+    "CFOToNP":             "累计 · 经营现金流净额 / 净利润 · 小数（净利为负时符号会翻转）",
+    "CFOToGr":             "累计 · 经营现金流净额 / 营业总收入 · 小数",
+}
+
 # 小于这个字节数的 parquet 视作「半写文件」跳过，而不是让整批失败。
 # 根因：baostock_fundamental_fetcher.py 的 df.to_parquet(target) 是【非原子】写，
 # 下载器在跑时读的人会撞上 0 字节文件（实测 balance/sh.601006.parquet）。
