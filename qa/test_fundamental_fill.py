@@ -198,3 +198,21 @@ def test_missing_trading_days_raises():
     df = _event([{"statDate": "2020-03-31", "pubDate_profit": "2020-04-25"}])
     with pytest.raises(KeyError, match="trading_days"):
         FF.run(df, {}, {})
+
+# ── output_columns()：merge 的 None 分支靠它拿 43 列清单 ────────────
+
+def test_output_columns_matches_actual_output():
+    """output_columns() 必须和实际产出的列名与顺序完全一致。
+
+    独立真源：43 这个数字和首尾元素是写死的，不是从 output_columns() 反推的。
+    """
+    df = _event([{"statDate": "2020-03-31", "pubDate_profit": "2020-04-25"}])
+    out = FF.run(df, {}, {"trading_days": _days("2020-04-27")})
+
+    cols = FF.output_columns()
+    assert len(cols) == 43
+    assert cols[0] == "statDate"
+    assert cols[1:4] == ["roeAvg", "npMargin", "gpMargin"]
+    assert cols[9:11] == ["pubDate_profit", "lag_profit"]
+    assert cols[-1] == "lag_cashflow"
+    assert list(out.columns) == cols

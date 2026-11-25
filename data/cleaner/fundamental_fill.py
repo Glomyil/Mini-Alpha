@@ -5,6 +5,14 @@ from data.cleaner import base
 from data.fundamental_merge import TABLES
 
 
+def output_columns() -> list[str]:
+    """本环节输出的列（不含索引 date），顺序 = 实际产出顺序。"""
+    cols = ["statDate"]
+    for table, group in TABLES.items():
+        cols.extend([*group, f"pubDate_{table}", f"lag_{table}"])
+    return cols
+
+
 def run(df, params, ctx, kind="fundamental") -> pd.DataFrame:
     base.check_not_empty(df, context="fundamental_fill")
     base.check_required_columns(df, ["statDate"])
