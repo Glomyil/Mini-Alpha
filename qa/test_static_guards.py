@@ -168,3 +168,37 @@ def test_every_fundamental_column_has_a_caliber_entry():
     assert not missing, f"这些列没有口径说明: {missing}"
     assert not extra, f"CALIBER 里有 TABLES 不存在的列: {extra}"
     assert len(produced) == 32, f"merge 规格应是 32 个指标，实际 {len(produced)}"
+
+# ── 面板列投影（2026-11-23）──────────────────────────────
+
+def test_panel_cols_covers_every_column_build_panels_reads():
+    """_PANEL_COLS 必须覆盖 build_panels 里所有 d["..."] 的访问。
+
+    为什么要有：_PANEL_COLS 是【手写的第二份清单】（第一份是 build_panels 里真正读的列）。
+    冗余没有校验就是定时炸弹（PITFALLS #26）—— 有人加了 d["new_col"] 却忘了改
+    _PANEL_COLS，read_parquet(columns=...) 就静默读不到它，面板整列变 NaN，
+    而且报告上看不出来（正是 #24「有默认值的观测会骗人」）。
+
+    用 AST 而不是正则：正则会把注释里的 d["x"] 也算进去，也会漏掉带空格的写法。
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from backtest import panel as PN
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(PN.build_panels)))
+    read = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "d"
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)):
+            read.add(node.slice.value)
+
+    assert read, "没解析出任何 d[\"...\"] —— build_panels 的写法变了？"
+    missing = sorted(read - set(PN._PANEL_COLS))
+    assert not missing, (
+        f"build_panels 读了 _PANEL_COLS 没声明的列: {missing}"
+        f"（列投影会静默读不到它们 ⇒ 面板整列 NaN）")

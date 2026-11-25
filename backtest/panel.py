@@ -23,6 +23,12 @@ FIELDS = ["hfq_close", "hfq_open", "ret_1d_hfq",
           "is_st"]
 _SELF = Path(__file__)                            # 判断"缓存是不是比这份代码新"
 
+# 面板真正用到的 11 列。cleaner_daily 带上 42 个财务列后（T-6.2），
+# 不投影会让重建多读 2.5 倍字节。⚠️ 改动 build_panels 里任何 d["..."] 都要同步这里。
+_PANEL_COLS = ["date", "hfq_close", "hfq_open", "ret_1d_hfq", "float_mv",
+               "is_suspended", "is_price_bad",
+               "flag_open_limit_up", "flag_open_limit_down", "isST", "amount"]
+
 
 def _reason_of(no_susp, no_bad, has_px, lim_up, lim_dn):
     """单票层面的 reason：0=ok 1=停牌 2=涨停买不到 3=跌停卖不掉 5=有行无价。
@@ -103,7 +109,15 @@ def build_panels(files):
     # """读 cleaner_daily → 6 张宽表（不做清洗、不落盘）"""
     c_l, o_l, r_l, t_l, a_l, rs_l, mv_l, st_l = [], [], [], [], [], [], [], []  # 想新建宽表就自己往等式左边加列表名，右边加列表:[]
     for p in files:
-        d = pd.read_parquet(p)
+        # 列投影：只读 _PANEL_COLS。实测 1.36×（200 文件 0.55s → 0.41s，当前 25 列）。
+        # ⚠️ 不要先 read_schema 再读：那要多开一次文件，实测反而慢 2.7×
+        #   （文件只有 223 KB，二次开文件的开销盖过少读列的好处）。
+        try:
+            d = pd.read_parquet(p, columns=_PANEL_COLS)
+        except (ValueError, KeyError):
+            # 旧文件缺列（11 列那种）⇒ 回退全读，让下面两处 `if "x" in d.columns`
+            # 的降级告警照常跑。ArrowInvalid 是 ValueError 的子类，能被这行接住。
+            d = pd.read_parquet(p)
         # float_mv 缺失 ⇒ 给 NaN 并大声警告一次。
         #   为什么不 raise：中性化还没写（明天的活），现在报错会让整个测试套件红掉、
         #   阻塞其他工作。真正该"硬失败"的地方是明天的 neutralize()（三条恒等式会抓住 NaN）。
