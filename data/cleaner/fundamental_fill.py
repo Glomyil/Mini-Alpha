@@ -20,7 +20,7 @@ def run(df, params, ctx, kind="fundamental") -> pd.DataFrame:
         raise KeyError("ctx 缺 'trading_days'（交易日索引）"
                        " —— fund_fill 需要它把期频摊到日频")
     # 排序前置：让 out 与 left 同序，写回不依赖 label 对齐（隐式正确要消掉）
-    days = pd.DatetimeIndex(ctx["trading_days"]).sort_values()
+    days = pd.DatetimeIndex(ctx["trading_days"]).as_unit("ns").sort_values()
     left = pd.DataFrame({"date": days}).sort_values("date")   # merge_asof 要求升序
     out = pd.DataFrame(index=pd.Index(days, name="date"))
     out["statDate"] = pd.NaT

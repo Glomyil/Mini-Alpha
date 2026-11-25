@@ -216,3 +216,18 @@ def test_output_columns_matches_actual_output():
     assert cols[9:11] == ["pubDate_profit", "lag_profit"]
     assert cols[-1] == "lag_cashflow"
     assert list(out.columns) == cols
+
+def test_trading_days_in_microsecond_unit_still_works():
+    """trading_days 传 [us] 也必须能跑。
+
+    事件表是 datetime64[us]（DuckDB CAST 出来的），而 merge_asof 要求两边同单位。
+    不能只归一化右边 —— 左边来自调用方，单位不该被假定。
+    """
+    df = _event([{"statDate": "2020-03-31", "pubDate_profit": "2020-04-25",
+                  "roeAvg": 0.05}])
+    days_us = pd.DatetimeIndex(pd.to_datetime(["2020-04-27"])).as_unit("us")
+    assert str(days_us.dtype) == "datetime64[us]"
+
+    out = FF.run(df, {}, {"trading_days": days_us})
+    assert len(out) == 1
+    assert out["roeAvg"].iloc[0] == pytest.approx(0.05)
