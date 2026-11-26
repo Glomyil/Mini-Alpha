@@ -6,7 +6,7 @@
 跑法：
     python -m data.cleaner.pipeline      # 手动冒烟：前 3 只、2020 区间
 扩展：
-    写完一个环节，就在 PIPELINE 里加一行 —— 其它地方都不用动
+    写完一个环节，就在对应的清单里加一行 —— 其它地方都不用动（行情链 PIPELINE / 财务链 FUND_PIPELINE）
 """
 import sys
 
@@ -16,10 +16,13 @@ from config import constants as C
 from data import loader
 from data.cleaner import base
 from data.cleaner import align, suspension, price, limits, adjust, derived
+from data.cleaner import fundamental_fill, fund_quality
 # 环节清单：顺序 = 执行顺序；元素 = (环节名, 模块)
 PIPELINE = [("align", align), ("suspension", suspension), ("price", price), ("limits", limits), ("adjust", adjust), ("derived", derived)
             # ("align", align),                   # 这里填充对应的模块名称，方便后续效用
             ]
+FUND_PIPELINE = [("align", align), ("fund_quality", fund_quality),
+                 ("fundamental_fill", fundamental_fill)]
 
 # 守卫：base.PIPELINE_NAMES 是给"不能依赖本模块的代码"用的名字常量（如 backtest/panel.py）
 #       两边漂了 ⇒ 缓存身份会误判 ⇒ 必须当场炸，不能静默
@@ -30,14 +33,19 @@ _START, _END = "2020-01-01", "2020-12-31"
 
 
 def run_one(df, ctx, steps=None, kind: str = "stock"):
-    """让一只股票的 df 依次走过清单里的每个环节 → (df, 每步报告)"""
+    """让一只股票的 df 依次走过清单里的每个环节（kind 决定走哪条链）→ (df, 每步报告)"""
     # ctx 契约：环节会读这两个键，缺了当场报错（别等到环节里 KeyError）
+    if kind not in ("stock", "fundamental"):
+        raise ValueError(f"未知的 kind={kind!r}，可选 ('stock', 'fundamental')")
     for key in ("asset_type", "code"):  # 用于标记对应数据的类型并检测对应的列
         if key not in ctx:
             # 若数据出现错误，或报错并反应对应缺失列
             raise KeyError(f"ctx 缺必填键 '{key}'（现有: {list(ctx)}）")
 
     reports = []
+    if steps is None:
+        steps = PIPELINE if kind == "stock" else FUND_PIPELINE
+
     for name, mod in (PIPELINE if steps is None else steps):
         before_cols = list(df.columns)          # 记账：进环节前的列（快照）
         rows_before = len(df)                   # 记账：进环节前的行数
@@ -87,7 +95,8 @@ def _step_clean(codes, start, end, out_dir):
     from data.cleaner import clean_to_disk        # 延迟 import：避免与它互相 import
     meta = clean_to_disk.run(codes, start, end, out_dir)
     if meta["failures"]:                          # 只级失败：出声，但不中断 ✓
-        logger.warning(f"clean 有 {len(meta['failures'])} 只失败，样例：{meta['failures'][:3]}")
+        logger.warning(
+            f"clean 有 {len(meta['failures'])} 只失败，样例：{meta['failures'][:3]}")
     if codes and meta["stocks"] == 0:             # 一只都没成 ⇒ 段级问题（写不了盘/读不了源）✗
         raise RuntimeError(
             f"clean 一只都没写成功（{len(meta['failures'])} 只失败）—— 拒绝往下走，"
@@ -126,7 +135,8 @@ def run_all(codes=None, start=_ALL_START, end=_ALL_END,
     """
     codes = loader.list_codes() if codes is None else codes
     steps = [("clean", _step_clean), ("panel", _step_panel), ("bt", _step_bt)]
-    logger.info(f"总调度开始：{len(steps)} 步 | 标的 {len(codes)} 只 | 区间 {start} ~ {end}")
+    logger.info(
+        f"总调度开始：{len(steps)} 步 | 标的 {len(codes)} 只 | 区间 {start} ~ {end}")
     for i, (name, fn) in enumerate(steps, 1):
         logger.info(f"[{i}/{len(steps)}] {name} 开始 …")
         try:
@@ -143,7 +153,8 @@ def run_all(codes=None, start=_ALL_START, end=_ALL_END,
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "all":
-        raise SystemExit(run_all())               # 总调度：python -m data.cleaner.pipeline all
+        # 总调度：python -m data.cleaner.pipeline all
+        raise SystemExit(run_all())
     codes = loader.list_codes()[:3]
     print("候选清单前 3 只:", codes)
     run_pipeline(codes, _START, _END)
